@@ -590,7 +590,6 @@ def cast_to_fp16(model, inputs):
 
 
 def cast_to_fp32(model, inputs):
-    # cast model and inputs to fp16
     model = model.to(torch.float32)
 
     inputs = tuple(
@@ -603,6 +602,22 @@ def cast_to_fp32(model, inputs):
         )
     )
     return model, inputs
+
+
+def cast_to_fp64(model, inputs):
+    model = model.to(torch.float64)
+
+    inputs = tuple(
+        tree_map(
+            lambda x: x.to(torch.float64)
+            if getattr(x, "dtype", None) == torch.float32
+               or getattr(x, "dtype", None) == torch.float16
+            else x,
+            inputs,
+        )
+    )
+    return model, inputs
+
 
 
 def main():
@@ -1108,15 +1123,16 @@ def run_one_model(
             assert not torchdynamo.utils.is_jit_model(submod)
 
         torch.manual_seed(1337)
-        correct_result = model_iter_fn(copy.deepcopy(model), example_inputs)
+        correct_result = model_iter_fn(*cast_to_fp64(copy.deepcopy(model), example_inputs))
 
-        torch.manual_seed(1337)
-        if current_name != "pyhpc_turbulent_kinetic_energy":
-            correct_rerun_result = model_iter_fn(copy.deepcopy(model), example_inputs)
-            if not same(correct_result, correct_rerun_result):
-                print("INCORRECT - Variation in Eager runs itself")
-                if not skip_accuracy_check:
-                    return sys.exit(-1)
+        if False:
+            torch.manual_seed(1337)
+            if current_name != "pyhpc_turbulent_kinetic_energy":
+                correct_rerun_result = model_iter_fn(copy.deepcopy(model), example_inputs)
+                if not same(correct_result, correct_rerun_result):
+                    print("INCORRECT - Variation in Eager runs itself")
+                    if not skip_accuracy_check:
+                        return sys.exit(-1)
 
         torch.manual_seed(1337)
         torchdynamo.reset()

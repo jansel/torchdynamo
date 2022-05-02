@@ -97,6 +97,10 @@ def same(a, b, cos_similarity=False, tol=1e-4):
             print(f"Similarity score={res.cpu().numpy()}")
             return res >= 0.99
         else:
+            a = a.to(torch.float64)
+            b = b.to(torch.float64)
+            print()
+            print("Max difference", torch.abs(a-b).max().item())
             return torch.allclose(a, b, atol=tol, rtol=tol)
     elif isinstance(a, (str, int, float, type(None), bool, torch.device)):
         return a == b

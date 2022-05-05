@@ -61,9 +61,9 @@ log = logging.getLogger(__name__)
 SKIP = {
     # non-deterministic output / cant check correctness
     "pyhpc_turbulent_kinetic_energy",
-    # https://github.com/facebookresearch/torchdynamo/issues/101
+    # https://github.com/pytorch/torchdynamo/issues/101
     "detectron2_maskrcnn",
-    # https://github.com/facebookresearch/torchdynamo/issues/145
+    # https://github.com/pytorch/torchdynamo/issues/145
     "fambench_xlmr",
 }
 
@@ -104,6 +104,32 @@ USE_SMALL_BATCH_SIZE = {
     "hf_Reformer": 4,
     "timm_efficientdet": 1,
 }
+
+# These benchmarks took >600s on an i9-11900K CPU
+VERY_SLOW_BENCHMARKS = {
+    "hf_BigBird",  # 3339s
+    "hf_Longformer",  # 3062s
+    "hf_T5",  # 930s
+}
+
+# These benchmarks took >60s on an i9-11900K CPU
+SLOW_BENCHMARKS = {
+    *{
+        "BERT_pytorch",  # 137s
+        "demucs",  # 116s
+        "fastNLP_Bert",  # 242s
+        "hf_Albert",  # 221s
+        "hf_Bart",  # 400s
+        "hf_Bert",  # 334s
+        "hf_DistilBert",  # 187s
+        "hf_GPT2",  # 470s
+        "hf_Reformer",  # 141s
+        "speech_transformer",  # 317s
+        "vision_maskrcnn",  # 99s
+    },
+    *VERY_SLOW_BENCHMARKS,
+}
+
 
 current_name = ""
 current_device = ""
@@ -661,6 +687,9 @@ def main():
     parser.add_argument("--float16", action="store_true", help="cast model to fp16")
     parser.add_argument("--float32", action="store_true", help="cast model to fp32")
     parser.add_argument("--cosine", action="store_true", help="use cosine similarity")
+    parser.add_argument(
+        "--fast", "-f", action="store_true", help="skip slow benchmarks"
+    )
     parser.add_argument("--only", help="used by --isolate to run just one model")
     parser.add_argument(
         "--minimum-call-count", type=int, help="filter out graphs with too few ops"
@@ -775,6 +804,11 @@ def main():
         help="Accuracy testing and speedup using Torchscript (NNC/NVFuser) vs eager",
     )
     group.add_argument(
+        "--inductor",
+        action="store_true",
+        help="Measure speedup with TorchInductor",
+    )
+    group.add_argument(
         "--backend",
         choices=torchdynamo.list_backends(),
         help="measure speedup with a given backend",
@@ -818,9 +852,6 @@ def main():
             }
         )
 
-    if args.no_skip:
-        SKIP.clear()
-
     if args.nvfuser:
         torch._C._jit_override_can_fuse_on_cpu(False)
         torch._C._jit_override_can_fuse_on_gpu(False)
@@ -845,6 +876,12 @@ def main():
     else:
         model_iter_fn = forward_pass
 
+    if args.fast:
+        SKIP.update(SLOW_BENCHMARKS)
+
+    if args.devices == ["cpu"]:
+        SKIP.update(VERY_SLOW_BENCHMARKS)
+
     if args.no_skip:
         SKIP.clear()
 
@@ -856,6 +893,19 @@ def main():
         optimize_ctx = torchdynamo.optimize(dummy_fx_compile, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "overheads.csv"
+    elif args.inductor:
+        import torchinductor
+        from torchinductor.compile_fx import compile_fx
+
+        if args.threads:
+            torchinductor.config.cpp.threads = args.threads
+
+        optimize_ctx = torchdynamo.optimize(compile_fx, nopython=args.nopython)
+        experiment = speedup_experiment
+        output_filename = "inductor.csv"
+        args.isolate = True
+        args.float32 = True
+        args.cosine = True
     elif args.online_autotune:
         optimize_ctx = torchdynamo.optimize(online_autotuner, nopython=args.nopython)
         experiment = speedup_experiment
@@ -1110,6 +1160,8 @@ def run_one_model(
     cos_similarity=False,
     skip_accuracy_check=False,
 ):
+    t0 = time.perf_counter()
+
     tolerance = 1e-4
     # Increase the tolerance for torch allclose
     if is_training and current_device == "cuda" and name in REQUIRE_HIGHER_TOLERANCE:
@@ -1168,7 +1220,9 @@ def run_one_model(
             frames_third_pass = 0
 
         if output_filename and "coverage" in output_filename:
-            results.append(f"{ok:3}/{total:3} +{frames_third_pass} frames")
+            results.append(
+                f"{ok:3}/{total:3} +{frames_third_pass} frames {time.perf_counter()-t0:3.0f}s"
+            )
 
         results.append(experiment(model, example_inputs))
         print(" ".join(map(str, results)))

@@ -9,7 +9,6 @@ import operator
 from typing import Dict
 from typing import List
 
-import numpy
 import sympy
 import torch
 
@@ -454,11 +453,6 @@ class TritonKernel(Kernel):
             ranges.construct(length)
             for length, ranges in zip(lengths, self.range_trees)
         ]
-
-    def run(self, node: "torchinductor.scheduler.SchedulerNode"):
-        node.run(*self.set_ranges(*node.get_ranges()))
-        # node.mark_run()
-        # node.codegen(self.set_ranges(*node.get_ranges()))
 
     @staticmethod
     def _split_iteration_ranges(
@@ -911,6 +905,21 @@ class TritonScheduling:
                 group += (V.graph.sizevars.simplify(sympy_product(s)),)
         return group
 
+    def create_node_schedule_pointwise(self, numel: sympy.Expr):
+        """
+        Get a list of SchedulerNode to execute in a single triton kernel.
+
+        `numel` is the number of elements in the input/output
+        """
+        node_schedule = []
+        for node in self.scheduler.pop_group(
+            (numel, sympy.Integer(1)),
+        ):
+            node.mark_run()
+            node_schedule.append(node)
+            node.mark_fusable()
+        return node_schedule
+
     def create_node_schedule_reduction(
         self, numel: sympy.Expr, reduction_numel: sympy.Expr
     ):
@@ -961,42 +970,11 @@ class TritonScheduling:
             node_schedule.append(EnableReduction)  # open new reduction loop
 
             if self.is_better_tiling_ready(numel, reduction_numel):
+                # early exit to prevent a fusion that would result in worse tiling
                 break
 
         self.scheduler.enqueue(nodes_to_reschedule)
         return node_schedule
-
-    def create_node_schedule_pointwise(self, numel: sympy.Expr):
-        """
-        Get a list of SchedulerNode to execute in a single triton kernel.
-
-        `numel` is the number of elements in the input/output
-        """
-        node_schedule = []
-        for node in self.scheduler.pop_group(
-            (numel, sympy.Integer(1)),
-        ):
-            node.mark_run()
-            node_schedule.append(node)
-            node.mark_fusable()
-        return node_schedule
-
-    def is_better_tiling_ready(self, numel, reduction_numel):
-        """
-        Check for a pending node wanting a different tiling strategy
-        than the given reduction.
-        """
-        has_tiled = False
-        nodes_to_reschedule = []
-        for node in self.scheduler.pop_group(
-            (numel * reduction_numel, sympy.Integer(1))
-        ):
-            tiling = self.select_node_tiling(node)
-            if tiling and tuple(tiling) != (numel, reduction_numel):
-                has_tiled = True
-            nodes_to_reschedule.append(node)
-        self.scheduler.enqueue(nodes_to_reschedule)
-        return has_tiled
 
     def codegen(self, numel, reduction_numel):
         """
@@ -1051,7 +1029,7 @@ class TritonScheduling:
         self.scheduler.maybe_free_buffers()
 
     @staticmethod
-    @functools.lru_cache(64)
+    @functools.lru_cache(32)
     def select_node_tiling(node):
         ranges, reduction_ranges = node.get_ranges()
         if len(ranges) <= 1:
@@ -1089,16 +1067,15 @@ class TritonScheduling:
             `(tile1, tile2, reduction_numel)` s.t. `tile1 * tile2 == numel`
 
         """
+        if reduction_numel != 1:
+            # TODO(jansel): should we tile reductions?
+            return (numel, reduction_numel)
+
         candidate_tiles = collections.Counter()
         for node in EnableReduction.filter(node_schedule):
-            if reduction_numel != 1 and not node.is_reduction():
-                continue
             tiled_groups = TritonScheduling.select_node_tiling(node)
             if tiled_groups:
                 candidate_tiles[tiled_groups] += 1
-
-        if reduction_numel != 1:
-            return (numel, reduction_numel)
 
         if len(candidate_tiles) > 1:
             log.warning(
@@ -1107,6 +1084,7 @@ class TritonScheduling:
                 list(candidate_tiles.keys()),
             )
 
+        # TODO(jansel): join two 2D tiles into a 3D tile
         # TODO(jansel): add a cost function for tiling instead of most_common
         for tiled_groups, count in candidate_tiles.most_common():
             new_groups = (*tiled_groups, reduction_numel)
@@ -1117,6 +1095,23 @@ class TritonScheduling:
             ):
                 return new_groups
         return (numel, reduction_numel)
+
+    def is_better_tiling_ready(self, numel, reduction_numel):
+        """
+        Check for a pending node wanting a different tiling strategy
+        than the given reduction.
+        """
+        better_tiled = False
+        nodes_to_reschedule = []
+        for node in self.scheduler.pop_group(
+            (numel * reduction_numel, sympy.Integer(1))
+        ):
+            tiling = self.select_node_tiling(node)
+            if tiling and tuple(tiling) != (numel, reduction_numel):
+                better_tiled = True
+            nodes_to_reschedule.append(node)
+        self.scheduler.enqueue(nodes_to_reschedule)
+        return better_tiled
 
     def flush(self):
         pass

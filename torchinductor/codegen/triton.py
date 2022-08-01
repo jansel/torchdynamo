@@ -1101,7 +1101,11 @@ class TritonScheduling:
             return (numel, reduction_numel)
 
         if len(candidate_tiles) > 1:
-            log.warning("%s tiling choices: %s", len(candidate_tiles), list(candidate_tiles.keys()))
+            log.warning(
+                "%s tiling choices: %s",
+                len(candidate_tiles),
+                list(candidate_tiles.keys()),
+            )
 
         # TODO(jansel): add a cost function for tiling instead of most_common
         for tiled_groups, count in candidate_tiles.most_common():

@@ -99,6 +99,9 @@ class ModularIndexing(sympy.Function):
             if len(new_terms) != len(base.args):
                 return ModularIndexing(sum(new_terms), divisor, modulus)
 
+        if isinstance(base, IndexingDiv):
+            return ModularIndexing(base.args[0], base.args[1] * divisor, modulus)
+
 
 class IndexingDiv(sympy.Function):
     """
@@ -116,8 +119,9 @@ class IndexingDiv(sympy.Function):
             return base
         if isinstance(base, sympy.Integer) and isinstance(divisor, sympy.Integer):
             return base // divisor
-        # if isinstance(base, IndexingDiv):
-        #    return IndexingDiv(base.args[0], base.args[1] * divisor)
+        if isinstance(base, IndexingDiv):
+            return IndexingDiv(base.args[0], base.args[1] * divisor)
+
         if isinstance(base, sympy.Add):
             for a in base.args:
                 gcd = sympy.gcd(a, divisor)

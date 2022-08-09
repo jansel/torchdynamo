@@ -283,13 +283,12 @@ def to(
 ):
     assert not memory_format, "TODO"
     assert layout in (None, torch.strided)
-
     if isinstance(device_or_dtype, torch.dtype):
         return to_dtype(x, device_or_dtype)
     elif isinstance(device_or_dtype, torch.device):
         return to_device(x, device_or_dtype)
-    elif device_or_dtype is not None:
-        assert False, device_or_dtype
+    else:
+        assert device_or_dtype is None, device_or_dtype
 
     if device is not None:
         x = to_device(x, device)
@@ -2332,7 +2331,8 @@ def make_reduction(reduction_type: str, override_dtype=None):
         if dtype is not None:
             x = to_dtype(x, dtype)
         assert (
-            reduction_type in ("sum", "amax", "amin", "any") or axis is None
+            reduction_type in ("sum", "amax", "amin", "any", "argmax", "argmin")
+            or axis is None
         ), "TODO: max with index"
         if reduction_type == "any":
             x = to_dtype(x, torch.bool)
@@ -2531,6 +2531,8 @@ register_lowering(aten.min)(make_reduction("min"))
 register_lowering(aten.amax)(make_reduction("amax"))
 register_lowering(aten.amin)(make_reduction("amin"))
 register_lowering(aten.any)(make_reduction("any", override_dtype=torch.bool))
+register_lowering(aten.argmax)(make_reduction("argmax"))
+register_lowering(aten.argmin)(make_reduction("argmin"))
 
 add = register_pointwise(aten.add)
 div = register_pointwise(aten.div)

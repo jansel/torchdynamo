@@ -1074,8 +1074,9 @@ def _unwrap(x):
     return x
 
 
-@register_lowering(torch.tensor)
-def tensor(data, *, dtype=None, device=None):
+@register_lowering([torch.tensor, aten.scalar_tensor])
+def tensor(data, *, dtype=None, device=None, layout=None):
+    assert layout in (None, torch.strided)
     if isinstance(_unwrap(data), int):
         dtype = dtype or torch.int64
     else:

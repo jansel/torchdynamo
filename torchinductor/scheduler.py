@@ -39,7 +39,7 @@ def should_use_template(node: ir.ExternKernel):
         if isinstance(node, ir.Convolution):
             return node.kernel != "aten.convolution"
         elif isinstance(node, ir.MatrixMultiply):
-            return config.triton.use_mm
+            return node.kernel != "aten.mm.out"
     return False
 
 
@@ -818,6 +818,9 @@ class Scheduler:
         self.check_can_free = set()
         self.fusable_deps = set()
         for node in nodes:
+            assert (
+                node.origins is not None
+            ), "All nodes passed to scheduling must have an origin"
             if node.is_no_op():
                 self.nodes.append(NopKernelSchedulerNode(self, node))
             elif isinstance(node, ir.ComputedBuffer):

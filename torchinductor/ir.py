@@ -1,3 +1,4 @@
+import contextlib
 import dataclasses
 import functools
 import itertools
@@ -9,6 +10,7 @@ from typing import Any
 from typing import Callable
 from typing import List
 from typing import Optional
+from typing import Set
 from unittest.mock import patch
 
 import numpy
@@ -200,8 +202,28 @@ def is_triton(device):
     return device.type == "cuda"
 
 
+@dataclasses.dataclass
 class IRNode(object):
+    _current_origins = set()
+
+    @staticmethod
+    @contextlib.contextmanager
+    def current_origins(origins: Set[torch.fx.Node]):
+        old = IRNode._current_origins
+        IRNode._current_origins = old | origins
+        yield
+        IRNode._current_origins = old
+
+    def __post_init__(self):
+        self.origins = set(self._current_origins)
+
+    def common_repr(self):
+        return (
+            [f"origins={self.origins}"] if hasattr(self, "origins") else ["no origins?"]
+        )
+
     def str_helper(self, lines):
+        lines = lines + self.common_repr()
         lines = indent(",\n".join(map(str, lines)))
         return f"{type(self).__name__}(\n{lines}\n)"
 
@@ -1651,91 +1673,6 @@ class ComputedBuffer(Buffer):
         )
         return (iter_ranges, reduce_ranges), body
 
-    @classmethod
-    def _tile_contiguous(cls, iter_ranges: List[sympy.Expr], strides):
-        """
-        Break iter_ranges up into at most max_tiles tiles based on stride==1
-        dimensions.
-
-        Transformation on iter_range like:
-            (s0, s1, s2, s3) => (s0, s1), (s2, s3)
-
-        Where each group will be tiled in a different dimension in the
-        output kernel.
-        """
-        tiles = []
-        current_tile = []
-        max_tiles = config.triton.max_tiles
-
-        # TODO(jansel): this is a placeholder heuristic, we should be able to do much better
-        for i in range(len(iter_ranges)):
-            current_tile.append(iter_ranges[i])
-            # break tiles on stride 1
-            if any(stride[i] == 1 for stride in strides):
-                tiles.append(current_tile)
-                current_tile = []
-
-        if current_tile:
-            tiles.append(current_tile)
-
-        if len(tiles) > max_tiles:
-            split = len(tiles) - max_tiles + 1
-            tiles = [[*itertools.chain(*tiles[:split])]] + tiles[split:]
-            assert len(tiles) == max_tiles, (len(tiles), max_tiles, split)
-
-        return tiles
-
-    @classmethod
-    def _tile_broadcasting(cls, iter_ranges: List[sympy.Expr], body, strides):
-        """
-        Break ranges up so that one dimension is all broadcasting.
-
-        Transformation on iter_ranges like:
-            (s0, s1, s2, s3) => (s0, s1), (s2, s3)
-
-        Where each group will be tiled in a different dimension in the
-        output kernel.
-        """
-        broadcasting_strides = [
-            stride for stride in strides if any(s == 0 for s in stride)
-        ]
-        if not broadcasting_strides:
-            return (iter_ranges,), body
-
-        # TODO(jansel): consider another load?  for now just take first one
-        broadcasting_stride = broadcasting_strides[0]
-
-        broadcast_ranges = []
-        broadcast_index = []
-        other_ranges = []
-        other_index = []
-
-        # TODO(jansel): this is a placeholder heuristic, we should be able to do much better
-        for i in range(len(iter_ranges)):
-            if broadcasting_stride[i] == 0:
-                broadcast_index.append(i)
-                broadcast_ranges.append(iter_ranges[i])
-            else:
-                other_index.append(i)
-                other_ranges.append(iter_ranges[i])
-
-        def call(broadcast, other, reduction=None):
-            assert not reduction
-            assert len(broadcast) == len(broadcast_index)
-            assert len(other) == len(other_index)
-            args = [None] * len(iter_ranges)
-            for i, v in itertools.chain(
-                zip(broadcast_index, broadcast),
-                zip(other_index, other),
-            ):
-                args[i] = v
-            return body(args)
-
-        if broadcast_ranges and other_ranges:
-            return (broadcast_ranges, other_ranges), call
-        else:
-            return (iter_ranges,), body
-
     @staticmethod
     def _apply_loop_reordering(
         index_vars, sizes, memory_addrs, reordering_reindex=None, priority_idx=[]
@@ -1874,6 +1811,7 @@ class ConcatKernel(NopKernel):
             )
         kernel.data.name = V.graph.register_buffer(kernel.data)
         kernel.data.inputs = cls.unwrap_storage(kernel.data.inputs)
+
         return kernel
 
     @classmethod
@@ -2069,7 +2007,7 @@ class ExternKernel(InputsKernel):
         sizevars = V.graph.sizevars
         sizes = self.get_size()
         strides = self.get_stride()
-        strides = [sizevars.guard_static_shape(x) for x in strides]
+        strides = [sizevars.size_hint(x) for x in strides]
         index_vars = [sympy.Symbol(f"d{i}") for i in range(len(sizes))]
         # reorder index vars according to stride
         index_order = sorted(range(len(strides)), key=strides.__getitem__, reverse=True)
@@ -2088,6 +2026,13 @@ class ExternKernel(InputsKernel):
 
         index = sympy.expand(index).subs(replacement)
         return index, tuple(new_sizes)
+
+    def __str__(self):
+        lines = [
+            f"{field.name}={getattr(self, field.name)}"
+            for field in dataclasses.fields(self)
+        ]
+        return self.str_helper(lines)
 
 
 @dataclasses.dataclass
@@ -2163,14 +2108,11 @@ class InplaceBernoulliFallback(ExternKernel):
 class MatrixMultiply(ExternKernelOut):
     kernel = "aten.mm.out"
 
-    def __init__(self, layout, inputs, constant_args=(), output_view=None):
+    def __init__(
+        self, layout, inputs, constant_args=(), output_view=None, kernel="aten.mm.out"
+    ):
         super().__init__(layout, inputs, constant_args, output_view)
-        if (
-            config.triton.use_mm
-            and len(inputs) > 0
-            and inputs[0].get_device().type == "cuda"
-        ):
-            self.kernel = "triton_mm_out"
+        self.kernel = kernel
 
     @classmethod
     def create(cls, a, b):
@@ -2184,6 +2126,27 @@ class MatrixMultiply(ExternKernelOut):
         else:
             a = cls.require_stride1(a)
         b = cls.require_stride1(b)
+
+        # choose runtime kernel
+        config_mm = config.triton.mm
+        # default kernel is aten
+        kernel = "aten.mm.out"
+        if config_mm == "aten":
+            kernel = "aten.mm.out"
+        elif config_mm == "triton" and a.get_device().type == "cuda":
+            kernel = "triton_ops.matmul_out"
+        elif config_mm == "autotune":
+            from .codegen.autotuner import tuned_mm
+
+            kernel = tuned_mm(
+                a.get_size(),
+                b.get_size(),
+                a.get_stride(),
+                b.get_stride(),
+                a.get_device(),
+                a.get_dtype(),
+            )
+
         return MatrixMultiply(
             layout=FlexibleLayout(
                 device=a.get_device(),
@@ -2191,6 +2154,7 @@ class MatrixMultiply(ExternKernelOut):
                 size=list(m) + [n],
             ),
             inputs=[a, b],
+            kernel=kernel,
         )
 
     def map_args(self):
@@ -2237,6 +2201,7 @@ class MatrixMultiply(ExternKernelOut):
             [
                 ("GROUP_M", "8"),
                 ("ACC_TYPE", ACC_TYPE),
+                ("allow_tf32", f"{torch.backends.cuda.matmul.allow_tf32}"),
             ]
         )
 
@@ -2534,14 +2499,9 @@ class Convolution(ExternKernelAlloc):
         self.preferred_stride_order = preferred_stride_order
 
     def codegen(self, wrapper):
-        if self.kernel == "triton_ops_conv":
+        if self.kernel == "triton_ops.conv":
             wrapper.header.writeline(
                 f"import torchinductor.triton_ops.conv as {self.kernel}"
-            )
-        # choose from different conv kernels
-        elif self.kernel == "tuned_conv":
-            wrapper.header.writeline(
-                f"from torchinductor.codegen.autotuner import {self.kernel}"
             )
         wrapper.writeline(
             f"{self.get_name()} = {self.kernel}({', '.join(self.codegen_args())})"
@@ -2603,24 +2563,6 @@ class Convolution(ExternKernelAlloc):
 
         output_size.append(out_channels)
 
-        config_conv = config.triton.convolution
-        if (
-            config_conv == "aten"
-            or len(kernel_size) != 2
-            or not is_triton(x.get_device())
-            or transposed
-            or groups != 1
-            or x.get_dtype() == torch.float16
-            or x.get_dtype() == torch.bfloat16
-        ):
-            kernel = "aten.convolution"
-        elif config_conv == "triton":
-            kernel = "triton_ops_conv"
-        else:
-            assert config_conv == "autotune"
-            kernel = "tuned_conv"
-        # triton conv only supports conv2d
-
         assert (
             len(stride)
             == len(padding)
@@ -2654,12 +2596,42 @@ class Convolution(ExternKernelAlloc):
                 V.graph.sizevars.guard_static_shape(output_size[-1])
             )
 
-        # for conv2d or conv3d, prefer channels last format
+        # choose runtime kernel
+        config_conv = config.triton.convolution
         if (
-            len(kernel_size) > 1
-            and is_triton(x.get_device())
-            and config.triton.convolution != "aten"
+            config_conv == "aten"
+            or len(kernel_size) != 2  # triton conv only supports conv2d
+            or not is_triton(x.get_device())
+            or transposed
+            or groups != 1
+            # or x.get_dtype() == torch.float16
+            # or x.get_dtype() == torch.bfloat16
         ):
+            kernel = "aten.convolution"
+        elif config_conv == "triton":
+            kernel = "triton_ops.conv"
+        else:
+            assert config_conv == "autotune"
+            from .codegen.autotuner import tuned_conv
+
+            # kernel = "tuned_conv"
+            kernel = tuned_conv(
+                x.get_size(),
+                weight.get_size(),
+                x.get_stride(),
+                weight.get_stride(),
+                stride,
+                padding,
+                dilation,
+                transposed,
+                output_padding,
+                groups,
+                x.get_device(),
+                x.get_dtype(),
+            )
+
+        # for conv2d or conv3d, prefer channels last format
+        if kernel == "triton_ops.conv":
             stride_order = [0] + list(reversed(range(1, len(kernel_size) + 1)))
             if len(stride_order) < len(output_size):
                 # add batch dim if it exists

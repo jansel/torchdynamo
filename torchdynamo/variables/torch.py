@@ -7,7 +7,8 @@ import numpy
 import torch._C
 import torch.nn
 
-from torchdynamo.variables.lists import ListVariable, TupleVariable
+from torchdynamo.variables.lists import ListVariable
+from torchdynamo.variables.lists import TupleVariable
 from torchdynamo.variables.misc import ProfileRecordFunctionVariable
 
 from .. import config

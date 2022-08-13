@@ -35,6 +35,7 @@ from ..utils import is_lazy_module
 from ..utils import istype
 from ..utils import product
 from ..utils import proxy_args_kwargs
+from ..utils import tensortype_to_dtype
 from .base import MutableLocal
 from .base import VariableTracker
 from .base import typestr
@@ -295,19 +296,6 @@ class TensorVariable(VariableTracker):
         return self.class_type
 
     def call_isinstance(self, tensor_type):
-        tensortype_to_dtype = {
-            torch.FloatTensor: (torch.float32, torch.float),
-            torch.DoubleTensor: (torch.float64, torch.double),
-            torch.HalfTensor: (torch.float16, torch.half),
-            torch.BFloat16Tensor: (torch.bfloat16,),
-            torch.ByteTensor: (torch.uint8,),
-            torch.CharTensor: (torch.int8,),
-            torch.LongTensor: (torch.int64, torch.long),
-            torch.IntTensor: (torch.int32, torch.int),
-            torch.ShortTensor: (torch.int16, torch.short),
-            torch.BoolTensor: (torch.bool,),
-        }
-
         def check_type(ty):
             if ty not in tensortype_to_dtype:
                 return self.python_type() is ty

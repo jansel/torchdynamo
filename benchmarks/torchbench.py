@@ -102,16 +102,6 @@ REQUIRE_HIGHER_TOLERANCE = {
     "vision_maskrcnn",
 }
 
-SKIP = {
-    # https://github.com/pytorch/torchdynamo/issues/101
-    "detectron2_maskrcnn",
-    # https://github.com/pytorch/torchdynamo/issues/145
-    "fambench_xlmr",
-    # https://github.com/pytorch/benchmark/issues/1106
-    "fambench_dlrm",
-}
-
-
 # These models need >1e-3 tolerance
 REQUIRE_EVEN_HIGHER_TOLERANCE = {
     "soft_actor_critic",
@@ -231,6 +221,8 @@ SKIP = {
     "detectron2_maskrcnn",
     # https://github.com/pytorch/torchdynamo/issues/145
     "fambench_xlmr",
+    # https://github.com/pytorch/benchmark/issues/1106
+    "fambench_dlrm",
 }
 
 

@@ -43,7 +43,7 @@ with open(filename, "r") as fh:
 # TODO - Figure out the reason of cold start memory spike
 BATCH_SIZE_DIVISORS = {
     "beit_base_patch16_224": 2,
-    "cait_m36_384": 4
+    "cait_m36_384": 4,
     "convit_base": 4,
     "convmixer_768_32": 2,
     "convnext_base": 4,

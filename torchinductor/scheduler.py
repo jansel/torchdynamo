@@ -520,7 +520,7 @@ class BlockedNodes:
                                 result.append(x)
                             else:
                                 self.add(x)
-                        unpacked_something = True
+                                unpacked_something = True
                     else:
                         result.append(out)
         if unpacked_something:

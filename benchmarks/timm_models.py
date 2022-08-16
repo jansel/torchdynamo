@@ -219,7 +219,9 @@ class TimmRunnner(BenchmarkRunner):
         )
         input_size = data_config["input_size"]
         recorded_batch_size = TIMM_MODELS[model_name]
-        recorded_batch_size = max(int(recorded_batch_size / BATCH_SIZE_DIVISORS.get(model_name, 1)), 1)
+        recorded_batch_size = max(
+            int(recorded_batch_size / BATCH_SIZE_DIVISORS.get(model_name, 1)), 1
+        )
         batch_size = batch_size or recorded_batch_size
 
         # example_inputs = torch.randn(

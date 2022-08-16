@@ -2,7 +2,6 @@
 import argparse
 import inspect
 import sys
-import time
 
 import numpy as np
 import tabulate

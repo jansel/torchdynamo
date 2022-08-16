@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 # We are primarily interested in TF32
 torch.backends.cuda.matmul.allow_tf32 = True
 
+
 current_name = ""
 current_device = ""
 current_batch_size = None

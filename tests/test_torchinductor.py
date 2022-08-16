@@ -1727,6 +1727,14 @@ class CommonTemplate:
                 torch.tensor([3, 4, 4, 3], dtype=torch.int64),
             ),
         )
+        self.common(
+            fn,
+            (
+                torch.randn(8, 8, 12),
+                torch.tensor([[0, 0, 2, 2]], dtype=torch.int64),
+                torch.tensor([[3], [4], [4], [3]], dtype=torch.int64),
+            ),
+        )
 
     def test_index2(self):
         def fn(a, b):
@@ -2324,7 +2332,7 @@ class CommonTemplate:
             fn,
             [
                 torch.zeros(2, 3),
-                0,
+                -1,
                 torch.tensor([[0]]),
                 torch.ones(2, 3),
             ],

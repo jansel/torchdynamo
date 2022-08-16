@@ -110,7 +110,9 @@ def decode_device(device):
     if device is None:
         return torch.tensor(0.0).device  # default device
     if isinstance(device, str):
-        return torch.device(device)
+        device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        return torch.device("cuda", index=torch.cuda.current_device())
     return device
 
 
@@ -1369,12 +1371,33 @@ def embedding(weight, indices, padding_idx=-1, scale_grad_by_freq=False, sparse=
     )
 
 
+def check_and_broadcast_indices(indices):
+    assert all(
+        [
+            i.get_dtype() in (torch.int64, torch.bool, torch.uint8)
+            for i in indices
+            if i is not None
+        ]
+    ), "indices must be int64, byte or bool"
+    assert all(
+        [i.get_dtype() == torch.int64 for i in indices if i is not None]
+    ), "bool indices are not supported yet"
+    valid_idxs = [i for i, x in enumerate(indices) if isinstance(x, TensorBox)]
+    new_indices = [None] * len(indices)
+    for i, x in zip(valid_idxs, broadcast_tensors(*[indices[i] for i in valid_idxs])):
+        new_indices[i] = x
+    return new_indices
+
+
 @register_lowering(aten.index, type_promote=False)
 def index(x, indices):
+    print(x, indices)
     assert isinstance(indices, (list, tuple))
     x_loader = x.make_loader()
-    indices_loaders = [i.make_loader() for i in indices if i is not None]
+    indices = check_and_broadcast_indices(indices)
     indices_sizes = [i.get_size() for i in indices if i is not None]
+    assert len(indices_sizes) > 0, "should have at least 1 valid index"
+    indices_loaders = [i.make_loader() for i in indices if i is not None]
     output_size = list(indices_sizes[0])
     for i in range(1, len(indices_sizes)):
         assert len(indices_sizes[i]) == len(output_size)
@@ -1421,6 +1444,7 @@ def index(x, indices):
 @register_lowering(aten.index_put_, type_promote=False)
 def index_put_(self, indices, values, accumulate=False):
     values = to_dtype(values, self.get_dtype())
+    indices = check_and_broadcast_indices(indices)
     assert isinstance(self, TensorBox)
     self.realize()
     V.graph.realize_users_of(self.get_name())
@@ -1507,7 +1531,7 @@ def scatter_reduce_(self, dim: int, index, src, reduce, *, include_self: bool = 
     assert reduce is None or reduce in {"sum"}
     assert isinstance(self, TensorBox)
     assert "int" in str(index.get_dtype())
-    assert 0 <= dim < len(self.get_size())
+    assert -len(self.get_size()) <= dim < len(self.get_size())
 
     self.realize()
     V.graph.realize_users_of(self.get_name())

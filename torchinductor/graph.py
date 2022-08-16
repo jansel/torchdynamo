@@ -84,6 +84,7 @@ class GraphLowering(torch.fx.Interpreter):
         self.randomness_seeds = []
         self.name_to_buffer = {}
         self.counters = collections.Counter()
+        self.timers = collections.Counter()
 
     def random_seed_buffer(self, device: torch.device):
         """

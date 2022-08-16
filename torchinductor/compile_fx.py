@@ -123,8 +123,6 @@ def compile_fx_inner(
             cudagraphs
             and set(graph.device_types) == {"cuda"}
             and not graph.mutated_inputs
-            # don't bother with cudagraphs for small number of kernels
-            and graph.counters["cuda_kernel_calls"] > 1
         ):
             compiled_fn = cudagraphify(
                 compiled_fn, example_inputs, static_input_idxs=range(num_fixed)

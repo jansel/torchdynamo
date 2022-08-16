@@ -33,6 +33,13 @@ class BoxedBool:
     def __bool__(self):
         return self.value
 
+    @staticmethod
+    def disable(obj):
+        if isinstance(obj, BoxedBool):
+            obj.value = False
+            return obj
+        return False
+
 
 class CheckEachNode(torch.fx.Interpreter):
     def call_function(self, target, args, kwargs):
@@ -119,14 +126,14 @@ def compile_fx_inner(
             cudagraphs
             and set(graph.device_types) == {"cuda"}
             and not graph.mutated_inputs
+            # don't bother with cudagraphs for small number of kernels
+            and graph.counters["cuda_kernel_calls"] > 2
         ):
             compiled_fn = cudagraphify(
                 compiled_fn, example_inputs, static_input_idxs=range(num_fixed)
             )
         elif cudagraphs:
-            if isinstance(cudagraphs, BoxedBool):
-                # Disable cudagraphs in the backwards pass too:
-                cudagraphs.value = False
+            BoxedBool.disable(cudagraphs)
 
             if set(graph.device_types) == {"cuda"}:
                 log.warning("skipping cudagraphs due to input mutation")

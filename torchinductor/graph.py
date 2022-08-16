@@ -1,3 +1,4 @@
+import collections
 import logging
 import operator
 from itertools import chain
@@ -82,6 +83,7 @@ class GraphLowering(torch.fx.Interpreter):
         self.randomness_offset = sympy.Integer(0)
         self.randomness_seeds = []
         self.name_to_buffer = {}
+        self.counters = collections.Counter()
 
     def random_seed_buffer(self, device: torch.device):
         """

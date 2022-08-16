@@ -24,6 +24,7 @@ decompositions = get_decompositions(
         aten.avg_pool2d_backward,
         aten.clamp_max,
         aten.clamp_min,
+        aten.col2im_backward,
         aten.cudnn_batch_norm,
         aten.cudnn_batch_norm_backward,
         aten.detach,

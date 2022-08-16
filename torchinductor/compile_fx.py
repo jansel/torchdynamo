@@ -119,9 +119,6 @@ def compile_fx_inner(
             wrap(graph.run)(*example_inputs)
             compiled_fn = wrap(graph.compile_to_fn())
 
-        # make sure it works, causes issues for mutation
-        # compiled_fn(*example_inputs)
-
         if (
             cudagraphs
             and set(graph.device_types) == {"cuda"}
@@ -135,12 +132,13 @@ def compile_fx_inner(
         elif cudagraphs:
             BoxedBool.disable(cudagraphs)
 
-            if set(graph.device_types) == {"cuda"}:
-                log.warning("skipping cudagraphs due to input mutation")
-            elif set(graph.device_types) != {"cpu"}:
+            if len(set(graph.device_types)) > 1:
                 log.warning("skipping cudagraphs due to multiple devices")
+            elif graph.mutated_inputs:
+                log.warning("skipping cudagraphs due to input mutation")
 
         if config.repro_level > 0:
+            # force errors to happen at compile time not runtime
             compiled_fn(*example_inputs)
 
         return compiled_fn

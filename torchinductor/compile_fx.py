@@ -134,7 +134,7 @@ def compile_fx_inner(
 
             if len(set(graph.device_types)) > 1:
                 log.warning("skipping cudagraphs due to multiple devices")
-            elif graph.mutated_inputs:
+            elif graph.mutated_inputs and set(graph.device_types) == {"cuda"}:
                 log.warning("skipping cudagraphs due to input mutation")
 
         if config.repro_level > 0:

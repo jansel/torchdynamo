@@ -641,6 +641,7 @@ class MiscTests(torchdynamo.testing.TestCase):
         self.assertEqual(cnts.frame_count, 1)
         self.assertEqual(cnts.op_count, 2)
 
+        torchdynamo.reset()
         cnts = torchdynamo.testing.CompileCounter()
         with torchdynamo.optimize(cnts):
             self.assertTrue(same(fn(obj2), correct2))
@@ -1100,7 +1101,7 @@ class MiscTests(torchdynamo.testing.TestCase):
 
         # Since the fn code object is already compiled, calling fn1 should
         # directly call the compiled_fn callable.
-        fn1(torch.randn(4))
+        torchdynamo.run()(fn1)(torch.randn(4))
         self.assertEqual(cnts1.frame_count, 0)
 
         # Test same behavior by reversing the calls
@@ -1111,7 +1112,7 @@ class MiscTests(torchdynamo.testing.TestCase):
         fn2 = torchdynamo.optimize(cnts2, nopython=True)(fn1)
         fn1(torch.randn(4))
         self.assertEqual(cnts1.frame_count, 1)
-        fn2(torch.randn(4))
+        torchdynamo.run()(fn2)(torch.randn(4))
         self.assertEqual(cnts2.frame_count, 0)
 
     def test_nested_disable_decorator(self):
@@ -1420,6 +1421,7 @@ class MiscTests(torchdynamo.testing.TestCase):
             fn(x, Foo.FOO)
         self.assertEqual(cnts.op_count, 2)
 
+        torchdynamo.reset()
         cnts = torchdynamo.testing.CompileCounter()
         with torchdynamo.optimize(cnts, nopython=True):
             fn(x, Foo.BAR)
@@ -1442,6 +1444,7 @@ class MiscTests(torchdynamo.testing.TestCase):
             m(data, correct_ref_id)
         self.assertEqual(cnts.op_count, 2)
 
+        torchdynamo.reset()
         cnts = torchdynamo.testing.CompileCounter()
         incorrect_ref_id = id(m) + 1
         with torchdynamo.optimize(cnts, nopython=True):
@@ -1481,6 +1484,7 @@ class MiscTests(torchdynamo.testing.TestCase):
             fn(x, torch.add)
         self.assertEqual(cnts.op_count, 2)
 
+        torchdynamo.reset()
         cnts = torchdynamo.testing.CompileCounter()
         with torchdynamo.optimize(cnts, nopython=True):
             fn(x, torch.mul)
@@ -1498,6 +1502,7 @@ class MiscTests(torchdynamo.testing.TestCase):
             with torchdynamo.optimize_assert(torchdynamo.testing.CompileCounter()):
                 f(x)
 
+        torchdynamo.reset()
         with patch.object(torchdynamo.config, "fake_tensor_propagation", False):
             with torchdynamo.optimize_assert(torchdynamo.testing.CompileCounter()):
                 f(x)
@@ -2028,19 +2033,32 @@ class MiscTests(torchdynamo.testing.TestCase):
             res = fn(x, m)
         self.assertEqual(ref, res)
 
-    def test_generate_tensor_from_list_of_numpy_primitive_type(self):
-        # Test sth like torch.LongTensor(list(np.int64, np.int64, ...))
-        def fn():
-            x = np.array([1, 2, 3, 4, 5, 6], dtype=np.int64)
-            y = list((x[0], x[2], x[4]))
-            z = torch.LongTensor(y)
-            return z
+    def test_change_backends(self):
+        @torchdynamo.optimize("eager", nopython=True)
+        def fn1():
+            return x + 1
 
-        ref = fn()
-        cnts = torchdynamo.testing.CompileCounter()
-        with torchdynamo.optimize(cnts):
-            res = fn()
-        self.assertTrue(same(ref, res))
+        @torchdynamo.optimize("ts")
+        def fn2():
+            return x + 2
+
+        @torchdynamo.optimize("eager", nopython=False)
+        def fn3():
+            return x + 1
+
+        x = torch.tensor([3, 5])
+
+        fn1()
+        fn1()
+        fn3()
+        self.assertRaises(torchdynamo.exc.ResetRequired, fn2)
+        fn1()
+        torchdynamo.reset()
+        fn2()
+        fn2()
+        self.assertRaises(torchdynamo.exc.ResetRequired, fn1)
+        self.assertRaises(torchdynamo.exc.ResetRequired, fn3)
+        fn2()
 
 
 class TestTracer(JitTestCase):

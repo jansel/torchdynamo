@@ -1055,6 +1055,36 @@ class TritonScheduling:
         self.scheduler.enqueue(nodes_to_reschedule)
         return node_schedule
 
+    def maybe_promote_pointwise_to_reduction(self, node_schedule, numel):
+        """
+        Check for opportunities to convert a pointwise node into a
+        reduction node to enable more fusions.
+        """
+        tiling = self.select_tiling(node_schedule, numel, sympy.Integer(1))
+
+        if len(tiling) == 3:
+            # This is already tiled, so there is only one good fusion choice
+            tile0, tile1, _ = tiling
+            if self.scheduler.has_group((tile0, tile1)):
+                # convert to reduction
+                log.warning("promote to reduction 3")
+                return (tile0, tile1)
+        elif len(tiling) == 2:
+            candidate_groups = list(
+                set(
+                    itertools.chain.from_iterable(
+                        node.possible_reduction_groups() for node in node_schedule
+                    )
+                )
+            )
+            candidate_groups.sort(key=lambda g: V.graph.sizevars.size_hint(g[1]))
+            for group in candidate_groups:
+                if self.scheduler.has_group(group):
+                    log.warning("promote to reduction 2")
+                    return group
+
+        return (numel, sympy.Integer(1))
+
     def codegen(self, numel, reduction_numel):
         """
         Generate a single triton kernel.  If reduction_numel != 1 this is
@@ -1062,6 +1092,13 @@ class TritonScheduling:
         """
         if reduction_numel == 1:
             node_schedule = self.create_node_schedule_pointwise(numel)
+            numel, reduction_numel = self.maybe_promote_pointwise_to_reduction(
+                node_schedule, numel
+            )
+            if reduction_numel != 1:
+                node_schedule.extend(
+                    self.create_node_schedule_reduction(numel, reduction_numel)
+                )
         else:
             if self.is_better_tiling_ready(numel, reduction_numel):
                 # preempt this reduction kernel with a tiled pointwise

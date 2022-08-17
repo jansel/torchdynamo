@@ -388,6 +388,15 @@ class SchedulerNode(BaseSchedulerNode):
         else:
             return len(self.group) - 1
 
+    def possible_reduction_groups(self):
+        """
+        Get any reduction groups of consumers of this node
+        """
+        for use in self.users:
+            if use.node.is_reduction():
+                _, (other_numel, other_rnumel) = use.node.group
+                yield (other_numel, other_rnumel)
+
 
 class FusedSchedulerNode(BaseSchedulerNode):
     """
@@ -1152,6 +1161,11 @@ class Scheduler:
             nodes = list(self.unordered_pop_group(group_without_device))
             nodes.sort(key=lambda x: x.get_sort_order())
             yield from nodes
+
+    def has_group(self, group_without_device):
+        nodes = list(self.unordered_pop_group(group_without_device))
+        self.enqueue(nodes)
+        return bool(nodes)
 
     def pop_groups(self, groups):
         keep_going = True

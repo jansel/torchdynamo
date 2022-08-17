@@ -130,7 +130,15 @@ class InputGen:
 
 @patch.object(torchinductor.config.triton, "cudagraphs", False)
 @patch("torchdynamo.config.raise_on_backend_error", True)
-def check_model(self: TestCase, model, example_inputs, tol=1e-4, check_lowp=True):
+def check_model(
+    self: TestCase,
+    model,
+    example_inputs,
+    tol=1e-4,
+    *,
+    check_lowp=True,
+    exact_dtype=True,
+):
     torchdynamo.reset()
 
     # check_lowp is ignored here, it's kept just to be able to call `common` with extra arg
@@ -170,7 +178,9 @@ def check_model(self: TestCase, model, example_inputs, tol=1e-4, check_lowp=True
     correct_flat, correct_spec = tree_flatten(correct)
     actual_flat, _ = tree_flatten(actual)
     correct_flat = tuple(
-        y.to(x.dtype) if isinstance(y, torch.Tensor) else y
+        y.to(x.dtype)
+        if isinstance(y, torch.Tensor) and y.dtype.is_floating_point
+        else y
         for x, y in zip(actual_flat, correct_flat)
     )
     correct = tree_unflatten(correct_flat, correct_spec)
@@ -178,11 +188,15 @@ def check_model(self: TestCase, model, example_inputs, tol=1e-4, check_lowp=True
     # print(correct)
     # print(actual)
     # print(correct - actual)
-    self.assertTrue(same(actual, correct, tol=tol, equal_nan=True))
+    self.assertTrue(
+        same(actual, correct, tol=tol, equal_nan=True, exact_dtype=exact_dtype)
+    )
 
 
 @patch.object(torchinductor.config.triton, "cudagraphs", False)
-def check_model_cuda(self: TestCase, model, example_inputs, check_lowp=True):
+def check_model_cuda(
+    self: TestCase, model, example_inputs, *, check_lowp=True, exact_dtype=True
+):
     if hasattr(model, "to"):
         model = model.to("cuda")
 
@@ -195,7 +209,7 @@ def check_model_cuda(self: TestCase, model, example_inputs, check_lowp=True):
         ).copy_(x)
 
     example_inputs = tuple(copy_fn(x) for x in example_inputs)
-    check_model(self, model, example_inputs)
+    check_model(self, model, example_inputs, exact_dtype=exact_dtype)
 
     if check_lowp:
 
@@ -209,7 +223,7 @@ def check_model_cuda(self: TestCase, model, example_inputs, check_lowp=True):
         example_inputs = list(map(downcast_fn, example_inputs))
         if hasattr(model, "to"):
             model = model.to(torch.half)
-        check_model(self, model, example_inputs, 2e-3)
+        check_model(self, model, example_inputs, 2e-3, exact_dtype=exact_dtype)
 
 
 class SweepInputs2:
@@ -518,6 +532,21 @@ class CommonTemplate:
 
         self.common(fn, (torch.randn(8, 8), torch.randn(8, 8)))
 
+    def test_sum_int(self):
+        def fn(x):
+            return 2 * x.sum(-1) + x.sum()
+
+        dtypes = torch.bool, torch.uint8, torch.int
+        inps = [torch.randint(2, (64,), dtype=dtype) for dtype in dtypes]
+        for i in inps:
+            self.common(fn, (i,), check_lowp=False)
+
+    def test_sum_dtype(self):
+        def fn(x):
+            return x * x.sum(-1, dtype=torch.double) + x.sum(dtype=torch.double)
+
+        self.common(fn, (torch.ones(32, 32) * 70,))
+
     def test_clamp(self):
         def fn(a, b):
             return (a.clamp(-0.1, 0.1), b.clamp(0), torch.clamp(a + b, max=0))
@@ -532,6 +561,13 @@ class CommonTemplate:
             return tmp, tmp + rng2
 
         self.common(fn, (torch.randn(8, 8),))
+
+    def test_arange1(self):
+        def fn(x):
+            rng1 = torch.arange(8, device=x.device)
+            return (x + rng1,)
+
+        self.common(fn, (torch.randint(4, (8, 8)),), check_lowp=False)
 
     def test_linspace(self):
         def fn(x):
@@ -715,7 +751,7 @@ class CommonTemplate:
             )
 
         a = torch.randint(1, 100, [8, 8])
-        self.common(fn, (a * 2, a))
+        self.common(fn, (a * 2, a), exact_dtype=False)  # FIXME
 
     def test_div4(self):
         def fn(a, b):
@@ -725,7 +761,11 @@ class CommonTemplate:
                 aten.div(a, b, rounding_mode="trunc"),
             )
 
-        self.common(fn, (torch.randint(-100, 0, [8, 8]), torch.randint(1, 10, [8, 8])))
+        self.common(
+            fn,
+            (torch.randint(-100, 0, [8, 8]), torch.randint(1, 10, [8, 8])),
+            exact_dtype=False,
+        )
 
     def test_div5(self):
         def fn(a, b):
@@ -736,7 +776,7 @@ class CommonTemplate:
             )
 
         # divide a scalar
-        self.common(fn, (torch.randint(-100, 0, [8, 8]), 16))
+        self.common(fn, (torch.randint(-100, 0, [8, 8]), 16), exact_dtype=False)
 
     def test_div6(self):
         def fn(a, b):
@@ -748,7 +788,9 @@ class CommonTemplate:
 
         # treat boolean as integer
         self.common(
-            fn, (torch.ones([8, 8], dtype=torch.bool), torch.randint(-100, -1, [8, 8]))
+            fn,
+            (torch.ones([8, 8], dtype=torch.bool), torch.randint(-100, -1, [8, 8])),
+            exact_dtype=False,  # FIXME
         )
 
     def test_div7(self):
@@ -765,6 +807,7 @@ class CommonTemplate:
                 torch.randint(2**32, 2**40, [100, 100]),
                 torch.randint(-10, -1, [100, 100]),
             ),
+            exact_dtype=False,  # FIXME
         )
 
     def test_sum_keepdims(self):
@@ -2742,6 +2785,8 @@ class CommonTemplate:
             [
                 torch.randn([8, 256, 256]),
             ],
+            exact_dtype=False,  # FIXME
+            check_lowp=False,  # FIXME
         )
 
     def test_argmax_argmin2(self):
@@ -2758,6 +2803,8 @@ class CommonTemplate:
             [
                 torch.randn([144, 144]),
             ],
+            exact_dtype=False,  # FIXME
+            check_lowp=False,  # FIXME
         )
 
     def test_vdd_clamp(self):

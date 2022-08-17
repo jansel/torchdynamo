@@ -54,7 +54,7 @@ class AotAutogradStrategy(object):
             # functinalization can leave the graph in bad state.
             try:
                 self.gm(*example_inputs)
-            except:
+            except Exception:
                 log.debug("TorchDynamo functionalization left the graph in bad state.")
                 self.gm = gm
 

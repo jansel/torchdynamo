@@ -1,3 +1,4 @@
+import logging
 import re
 import types
 from typing import Dict
@@ -9,7 +10,7 @@ import torch.nn
 
 from torchdynamo.variables.lists import ListVariable
 from torchdynamo.variables.lists import TupleVariable
-from torchdynamo.variables.misc import ProfileRecordFunctionVariable
+from torchdynamo.variables.misc import FakeContextWrappingVariable
 
 from .. import config
 from .. import variables
@@ -24,6 +25,8 @@ from ..utils import specialize_args_kwargs
 from ..utils import tensortype_to_dtype
 from .base import VariableTracker
 from .tensor import TensorWithTFOverrideVariable
+
+log = logging.getLogger(__name__)
 
 
 class TorchVariable(VariableTracker):
@@ -200,9 +203,14 @@ class TorchVariable(VariableTracker):
                 tensor_with_tf_override.subclass_torch_function__func,
                 tensor_with_tf_override.subclass_type,
             )
+        elif self.value is torch.autograd.profiler.profile:
+            if len(args) == 0 or len(args) > 0 and args[0]:
+                log.warning("Profiler will be ignored")
+            return FakeContextWrappingVariable(**options)
         elif self.value is torch.autograd.profiler.record_function:
             assert len(args) == 1
-            return ProfileRecordFunctionVariable(str(args[0].as_proxy()), **options)
+            log.warning("Profiler will be ignored")
+            return FakeContextWrappingVariable(**options)
         elif self.value is torch.jit.annotate:
             assert len(args) == 2
             return args[1]

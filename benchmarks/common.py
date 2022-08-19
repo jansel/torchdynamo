@@ -764,45 +764,32 @@ def null_experiment(args, model_iter_fn, model, example_inputs):
     return []
 
 
-def cast_to_fp16(model, inputs):
+def cast_to(dtype, model, inputs):
     # cast model and inputs to fp16
-    model = model.half()
+    if dtype == torch.float16:
+        model = model.half()
+    else:
+        model = model.to(dtype)
 
     inputs = tree_map(
-        lambda x: x.to(torch.float16)
-        if getattr(x, "dtype", None) == torch.float32
-        or getattr(x, "dtype", None) == torch.float64
+        lambda x: x.to(dtype)
+        if isinstance(x, torch.Tensor) and x.is_floating_point()
         else x,
         inputs,
     )
-
-    # Disable this part temporarily. Further evaluation needed
-    # TRT does not support int64. Some model does need it like Super_SloMo
-    # if current_name != "Super_SloMo" and current_name != "fastNLP_Bert":
-    #     inputs = tuple(
-    #         tree_map(
-    #             lambda x: x.to(torch.int32)
-    #             if getattr(x, "dtype", None) == torch.int64
-    #             else x,
-    #             inputs,
-    #         )
-    #     )
     return model, inputs
+
+
+def cast_to_fp16(model, inputs):
+    return cast_to(torch.float16, model, inputs)
+
+
+def cast_to_fp64(model, inputs):
+    return cast_to(torch.float64, model, inputs)
 
 
 def cast_to_fp32(model, inputs):
-    # cast model and inputs to fp16
-    model = model.to(torch.float32)
-
-    inputs = tree_map(
-        lambda x: x.to(torch.float32)
-        if getattr(x, "dtype", None) == torch.float16
-        or getattr(x, "dtype", None) == torch.float64
-        else x,
-        inputs,
-    )
-
-    return model, inputs
+    return cast_to(torch.float32, model, inputs)
 
 
 class DummyGradScaler:
@@ -822,8 +809,6 @@ class BenchmarkRunner:
             assert self.args.devices == ["cuda"], "AMP is supported only for CUDA"
             self.grad_scaler = torch.cuda.amp.GradScaler()
             self.autocast = torch.cuda.amp.autocast
-            # TODO - Debug whats going wrong with the numerics
-            self.args.cosine = True
 
     @property
     def args(self):
@@ -962,14 +947,11 @@ class BenchmarkRunner:
         self,
         name,
         model,
-        is_training,
         model_iter_fn,
         example_inputs,
         optimize_ctx,
         accuracy_ctx,
         experiment,
-        skip_accuracy_check=False,
-        dynamic_shapes=False,
         diff=False,
         branch=None,
     ):
@@ -991,14 +973,11 @@ class BenchmarkRunner:
                     self.run_one_model(
                         name,
                         model,
-                        is_training,
                         model_iter_fn,
                         example_inputs,
                         optimize_ctx,
                         accuracy_ctx,
                         experiment,
-                        skip_accuracy_check,
-                        dynamic_shapes,
                         diff=False,
                         branch=curr_branch,
                     )
@@ -1008,14 +987,11 @@ class BenchmarkRunner:
                     self.run_one_model(
                         name,
                         model,
-                        is_training,
                         model_iter_fn,
                         example_inputs,
                         optimize_ctx,
                         accuracy_ctx,
                         experiment,
-                        skip_accuracy_check,
-                        dynamic_shapes,
                         diff=False,
                         branch="main",
                     )
@@ -1030,27 +1006,52 @@ class BenchmarkRunner:
         elif branch:
             print("RUNNING ON BRANCH:", branch)
 
+        fp64_outputs = None
+        # Skip float64 checks for CI because it has smaller DRAM, leading to OOMs.
+        if not self.args.ci:
+            # Collect the fp64 reference outputs to be used later for accuracy checking.
+            try:
+                fp64_outputs = model_iter_fn(
+                    *cast_to_fp64(
+                        copy.deepcopy(model),
+                        torchdynamo.utils.clone_inputs(example_inputs),
+                    )
+                )
+            except Exception:
+                fp64_outputs = None
+
+        if self.args.float32:
+            model, example_inputs = cast_to_fp32(model, example_inputs)
+        elif self.args.float16:
+            model, example_inputs = cast_to_fp16(model, example_inputs)
+
+        # TODO - See if there is a better places to move these experiments
+        if experiment.func is cold_start_experiment or self.args.dynamic_shapes:
+            with self.pick_grad(name, self.args.training):
+                # skip correctness check for ds benchmark, becuase example_inputs are not
+                # compatible with the code below, and the same benchmarks can be run in
+                # non-dynamic shapes mode for correctness checks
+                correct_result = model_iter_fn(
+                    copy.deepcopy(model), torchdynamo.utils.clone_inputs(example_inputs)
+                )
+                torch.manual_seed(1337)
+                torchdynamo.reset()
+                results = []
+                results.append(experiment(model, example_inputs, optimize_ctx))
+                print(" ".join(map(str, results)))
+                return 0
+
         tolerance, cos_similarity = self.get_tolerance_and_cosine_flag(
-            is_training, current_device, name
+            self.args.training, current_device, name
         )
+
         experiment_kwargs = dict()
-        with self.pick_grad(name, is_training):
-            mode = "train" if is_training else "eval"
+        with self.pick_grad(name, self.args.training):
+            mode = "train" if self.args.training else "eval"
             sys.stdout.write(f"{current_device:4} {mode:5} {current_name:34} ")
             sys.stdout.flush()
             for submod in itertools.chain([model], model.modules()):
                 assert not torchdynamo.utils.is_jit_model(submod)
-
-            if dynamic_shapes:
-                # skip correctness check for ds benchmark, becuase example_inputs are not
-                # compatible with the code below, and the same benchmarks can be run in
-                # non-dynamic shapes mode for correctness checks
-                torch.manual_seed(1337)
-                torchdynamo.reset()
-                results = []
-                results.append(experiment(model, example_inputs))
-                print(" ".join(map(str, results)))
-                return 0
 
             torch.manual_seed(1337)
             correct_result = model_iter_fn(
@@ -1062,20 +1063,14 @@ class BenchmarkRunner:
                 correct_rerun_result = model_iter_fn(
                     copy.deepcopy(model), torchdynamo.utils.clone_inputs(example_inputs)
                 )
-                if not same(correct_result, correct_rerun_result):
+                if not same(correct_result, correct_rerun_result, fp64_outputs):
                     print("INCORRECT - Variation in Eager runs itself")
-                    if not skip_accuracy_check:
+                    if not self.args.skip_accuracy_check:
                         return sys.exit(-1)
 
             t0 = time.perf_counter()
             torch.manual_seed(1337)
             torchdynamo.reset()
-            if experiment.func is cold_start_experiment:
-                results = []
-                results.append(experiment(model, example_inputs, optimize_ctx))
-                print(" ".join(map(str, results)))
-                return 0
-
             try:
                 accuracy_model_iter_fn = accuracy_ctx(model_iter_fn)
                 new_result = accuracy_model_iter_fn(model, example_inputs)
@@ -1088,9 +1083,15 @@ class BenchmarkRunner:
                 # check correctness.
                 # TODO(jansel): submit upstream fix for this
                 pass
-            elif not same(correct_result, new_result, cos_similarity, tolerance):
+            elif not same(
+                correct_result,
+                new_result,
+                fp64_outputs,
+                cos_similarity=cos_similarity,
+                tol=tolerance,
+            ):
                 print("INCORRECT")
-                if not skip_accuracy_check:
+                if not self.args.skip_accuracy_check:
                     return sys.exit(-1)
             ok, total = Stats.reset_counters()
             results = []
@@ -1179,6 +1180,9 @@ def parse_args():
         "--batch-size-file", type=str, help="String to load batch size from"
     )
     parser.add_argument("--cosine", action="store_true", help="use cosine similarity")
+    parser.add_argument(
+        "--ci", action="store_true", help="Flag to tell that its a CI run"
+    )
     parser.add_argument(
         "--fast", "-f", action="store_true", help="skip slow benchmarks"
     )
@@ -1467,7 +1471,6 @@ def main(runner, original_dir=None):
 
     if args.inductor or args.inductor_dynamic or args.inductor_settings:
         runner.skip_models.update(runner.failing_torchinductor_models)
-        args.isolate = True
         args.cosine = True
         if args.float16:
             # TODO(jansel): check if correctness issue is real
@@ -1507,7 +1510,6 @@ def main(runner, original_dir=None):
         assert args.nvfuser, "TODO - Add another aot string for mem fusion with NNC"
         backend_str = "nvfuser" if args.nvfuser else "nnc"
         output_filename = f"cold_start_{backend_str}.csv"
-        args.isolate = True
         # TODO(whc) should we move this to a more general part of the script?
         torch.backends.cuda.matmul.allow_tf32 = True
     elif args.inductor or args.inductor_dynamic:
@@ -1533,12 +1535,10 @@ def main(runner, original_dir=None):
         optimize_ctx = torchdynamo.optimize(online_autotuner, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "speedups.csv"
-        args.isolate = True
     elif args.offline_autotune:
         optimize_ctx = torchdynamo.optimize(offline_autotuner, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "speedups.csv"
-        args.isolate = True
     elif args.python_key:
         optimize_ctx = torchdynamo.optimize(python_key, nopython=args.nopython)
         experiment = speedup_experiment
@@ -1551,24 +1551,20 @@ def main(runner, original_dir=None):
         )
         experiment = speedup_experiment
         output_filename = "speedups_ltc.csv"
-        args.isolate = True
     elif args.speedup_ltc_trivial:
         optimize_ctx = torchdynamo.optimize(
             backends.ltc_trivial, nopython=args.nopython
         )
         experiment = speedup_experiment
         output_filename = "speedups_ltc_trivial.csv"
-        args.isolate = True
     elif args.speedup_fixed1:
         optimize_ctx = torchdynamo.optimize(fixed_strategy1, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "speedups_fixed1.csv"
-        args.isolate = True
     elif args.speedup_fixed2:
         optimize_ctx = torchdynamo.optimize(fixed_strategy2, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "speedups_fixed2.csv"
-        args.isolate = True
     elif args.speedup_ts:
         experiment = speedup_experiment_ts
         output_filename = "baseline_ts.csv"
@@ -1652,7 +1648,6 @@ def main(runner, original_dir=None):
         optimize_ctx = torchdynamo.optimize(args.backend, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = f"speedup_{args.backend}.csv"
-        args.isolate = True
     elif args.log_conv_args:
         optimize_ctx = torchdynamo.optimize(conv_args_analysis, nopython=args.nopython)
         output_filename = "log_conv_args.csv"
@@ -1675,11 +1670,7 @@ def main(runner, original_dir=None):
     if output_filename:
         output_filename = os.path.join(torchdynamo.config.base_dir, output_filename)
 
-    if args.find_batch_sizes:
-        args.isolate = True
-
     if args.find_batch_sizes and args.only:
-        assert args.isolate
         for device in args.devices:
             batch_size = runner.batch_size_finder(device, args.only, model_iter_fn)
             print(args.only, batch_size)
@@ -1707,8 +1698,8 @@ def main(runner, original_dir=None):
             args.profiler_trace_name = args.profiler_trace_name
 
     if args.batch_size_file:
-        if not (args.only or args.isolate):
-            raise RuntimeError("--batch-size-file requires --only or --isolate")
+        if not args.only:
+            raise RuntimeError("--batch-size-file requires --only")
 
     experiment = functools.partial(experiment, args, model_iter_fn)
 
@@ -1738,22 +1729,14 @@ def main(runner, original_dir=None):
             current_batch_size = batch_size
             set_model_name(name)
 
-            if args.float32:
-                model, example_inputs = cast_to_fp32(model, example_inputs)
-            elif args.float16:
-                model, example_inputs = cast_to_fp16(model, example_inputs)
-
             runner.run_one_model(
                 name,
                 model,
-                args.training,
                 model_iter_fn,
                 example_inputs,
                 optimize_ctx,
                 accuracy_ctx,
                 experiment,
-                args.skip_accuracy_check,
-                args.dynamic_shapes,
                 diff=args.diff_main,
             )
         if args.generate_aot_autograd_stats:

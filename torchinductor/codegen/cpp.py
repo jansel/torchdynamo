@@ -490,6 +490,21 @@ class CppScheduling:
     def group_fn(self, sizes):
         return tuple(tuple(map(V.graph.sizevars.simplify, s)) for s in sizes)
 
+    @staticmethod
+    def can_fuse_horizontal(node1, node2):
+        _, (vars1, reduce1) = node1.group
+        _, (vars2, reduce2) = node2.group
+        if vars1 == vars2 and reduce1 == reduce2:
+            return True
+        if reduce1 == () and vars1 == vars2 + reduce2:
+            return True
+        # TODO(jansel): allow fusion pointwise suffix?
+        return False
+
+    @classmethod
+    def can_fuse_vertical(cls, node1, node2):
+        return cls.can_fuse_horizontal(node1, node2) and not node1.is_reduction()
+
     def codegen(self, *groups):
         group, reduction_group = groups
 
@@ -533,7 +548,10 @@ class CppScheduling:
             vars, reduction_vars = kernel.set_ranges(group, reduction_group)
 
             for node in nodes:
-                if node.group[1] == (group, reduction_group):
+                if node.group[1] in [
+                    (group, reduction_group),
+                    (group + reduction_group, ()),
+                ]:
                     assert not in_suffix
                     node.run(vars, reduction_vars)
                     node.mark_fusable()

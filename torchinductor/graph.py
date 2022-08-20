@@ -308,4 +308,5 @@ class GraphLowering(torch.fx.Interpreter):
         for name, value in self.constants.items():
             setattr(mod, name, value)
 
+        log.info("Removed buffers: %s", self.removed_buffers)
         return mod.call

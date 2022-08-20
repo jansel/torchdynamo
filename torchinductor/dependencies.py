@@ -16,6 +16,7 @@ import sympy
 
 from .codegen.common import _simplify_loops
 from .codegen.common import index_prevent_reordering
+from .utils import sympy_product
 from .virtualized import V
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,12 @@ class MemoryDep(typing.NamedTuple):
             return MemoryDep(renames[self.name], self.index, self.size)
         return self
 
+    def numel_hint(self):
+        vars = set(self.index.free_symbols)
+        return V.graph.sizevars.size_hint(
+            sympy_product([s for s in self.size if s in vars])
+        )
+
     def is_simple(self) -> bool:
         s = str(self.index)
         if "indirect" in s:
@@ -93,6 +100,9 @@ class StarDep(typing.NamedTuple):
         if self.name in renames:
             return StarDep(renames[self.name])
         return self
+
+    def numel_hint(self):
+        return 1
 
     def is_simple(self) -> bool:
         return False

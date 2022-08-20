@@ -660,6 +660,12 @@ class TritonKernel(Kernel):
         elif not mask:
             mask = ["None"]
 
+        if mask == ["xmask"] and index == 0 and self.range_trees[0].numel == 1:
+            # This causes a triton error:
+            # https://gist.github.com/jansel/70c4b1c8041f0f27f96ee95e2edca04a
+            # TODO(jansel): submit a bug report
+            mask = ["None"]
+
         return index_str, " & ".join(mask)
 
     def var_ranges(self):
@@ -955,6 +961,51 @@ class TritonScheduling:
     def group_fn(self, sizes):
         return tuple(V.graph.sizevars.simplify(sympy_product(s)) for s in sizes)
 
+    def can_fuse_horizontal(self, node1, node2):
+        _, (numel1, rnumel1) = node1.group
+        _, (numel2, rnumel2) = node2.group
+
+        log.info("can_fuse %s %s", node1, node2)
+
+        if node1.is_reduction() and node2.is_reduction():
+            return numel1 == numel2 and rnumel1 == rnumel2
+
+        if not node1.is_reduction() and not node2.is_reduction():
+            if not (numel1 == numel2 and rnumel1 == rnumel2):
+                return False
+
+            # check for a bad combined tiling
+            tiling1 = self.select_tiling(node1.get_nodes(), numel1, rnumel1)
+            tiling2 = self.select_tiling(node2.get_nodes(), numel1, rnumel1)
+            tiling3 = self.select_tiling(node1.get_nodes() + node2.get_nodes(), numel1, rnumel1)
+            if len(tiling1) > 2:
+                if len(tiling2) > 2:
+                    return tiling1 == tiling2 == tiling3
+                else:
+                    return tiling1 == tiling3
+            elif len(tiling2) > 2:
+                return tiling2 == tiling3
+
+            return True
+
+        if not node1.is_reduction() and node2.is_reduction():
+            assert rnumel1 == 1 and rnumel2 != 1
+            if numel1 == numel2 * rnumel2:
+                return TritonKernel.is_compatible(
+                        (numel2, rnumel2), node1.get_ranges()
+                ) and self.select_tiling(node1.get_nodes(), numel1) in (
+                        (numel1, 1),
+                        (numel2, rnumel2, 1),
+                )
+
+            return numel1 == numel2
+
+        assert node1.is_reduction() and not node2.is_reduction()
+        return self.can_fuse_horizontal(node2, node1)  # swap args
+
+    def can_fuse_vertical(self, node1, node2):
+        return self.can_fuse_horizontal(node1, node2)
+
     def create_node_schedule_pointwise(self, numel: sympy.Expr):
         """
         Get a list of SchedulerNode to execute in a single triton kernel.
@@ -1118,30 +1169,46 @@ class TritonScheduling:
         return self.codegen_node_schedule(node_schedule, numel, reduction_numel)
 
     def codegen_nodes(self, nodes):
-        node_schedule = []
         _, (numel, rnumel) = max(nodes, key=lambda x: int(x.is_reduction())).group
+        node_schedule = []
+        must_keep = set()
+        current_loop_writes = set()
+
+        @contextlib.contextmanager
+        def disable_reduction():
+            if node_schedule and node_schedule[-1] is EnableReduction:
+                node_schedule.pop()
+            else:
+                node_schedule.append(DisableReduction)
+            yield
+            node_schedule.append(EnableReduction)
+            current_loop_writes.clear()
 
         for node in nodes:
             _, (node_numel, node_rnumel) = node.group
             if (node_numel == numel and node_rnumel == rnumel) or (
                 node_numel == numel * rnumel and node_rnumel == 1
             ):
+                if current_loop_writes & node.recursive_predecessors:
+                    must_keep.update(current_loop_writes & node.recursive_predecessors)
+                    with disable_reduction():
+                        pass  # need to start a new reduction loop
+                current_loop_writes.add(node.get_name())
                 node_schedule.append(node)
             elif node_numel == numel and node_rnumel == 1:
-                if node_schedule and node_schedule[-1] is EnableReduction:
-                    node_schedule.pop()
-                else:
-                    node_schedule.append(DisableReduction)
-                node_schedule.append(node)
-                node_schedule.append(EnableReduction)
+                with disable_reduction():
+                    node_schedule.append(node)
             else:
                 raise NotImplementedError(
                     f"unexpected group: ({numel}, {rnumel}) != ({node_numel}, {node_rnumel})"
                 )
 
         for node in node_schedule:
-            node.mark_run()
-            node.mark_fusable()
+            if node not in (EnableReduction, DisableReduction):
+                node.mark_run()
+                node.mark_fusable()
+
+        log.info("schedule: %s", node_schedule)
 
         return self.codegen_node_schedule(node_schedule, numel, rnumel)
 
@@ -1172,7 +1239,6 @@ class TritonScheduling:
                 code = src_code.format(kernel_name=kernel_name)
                 wrapper.header.splice(code)
         kernel.call_kernel(wrapper, kernel_name)
-
         self.scheduler.barrier()
         self.scheduler.maybe_free_buffers()
 

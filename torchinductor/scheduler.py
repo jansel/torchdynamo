@@ -24,7 +24,6 @@ from .codegen.triton_template import template_codegen
 from .dependencies import MemoryDep
 from .dependencies import StarDep
 from .sizevars import SimplifyIndexing
-from .utils import sympy_product
 from .virtualized import V
 
 template_kernels = [ir.Convolution, ir.MatrixMultiply]
@@ -107,9 +106,6 @@ class BaseSchedulerNode:
             self.recursive_predecessors,
         )
 
-    def output_numel_hint(self):
-        return 1
-
     def update_mutated_names(self, renames: Dict[str, str]):
         self.set_read_writes(self.read_writes.rename(renames))
 
@@ -148,6 +144,9 @@ class BaseSchedulerNode:
 
     def get_name(self) -> str:
         return self.node.get_name()
+
+    def get_first_name(self) -> str:
+        return self.get_name()
 
     def get_names(self) -> Set[str]:
         return set([self.get_name()])
@@ -230,11 +229,6 @@ class ExternKernelSchedulerNode(BaseSchedulerNode):
     def get_ranges(self):
         return self._sizes
 
-    def output_numel_hint(self):
-        if hasattr(self, "group"):
-            _, (numel, _) = self.group
-            return V.graph.sizevars.size_hint(numel)
-
     def run(self, codegen_extern_call):
         self.allocate()
         self.scheduler.run_count += 1
@@ -310,7 +304,6 @@ class SchedulerNode(BaseSchedulerNode):
         self.set_read_writes(
             dependencies.extract_read_writes(self._body, *self._sizes, normalize=True)
         )
-        """
         if self.is_reduction():
             # reduction has last (reduced) dim in its sizes, and some
             # downstream dependencies get confused by it
@@ -327,9 +320,9 @@ class SchedulerNode(BaseSchedulerNode):
             # self.read_writes.writes = self.read_writes.writes | {
             #     w.maybe_swap_sizes() for w in self.read_writes.writes
             # }
-        """
 
     def can_remove_buffer(self, check_group):
+        # TODO(jansel): can we delete this entire thing?
         if (
             self.is_reduction()
             and len(self.users) == 1
@@ -352,12 +345,6 @@ class SchedulerNode(BaseSchedulerNode):
 
     def mark_fusable(self, broadcast_after_reduce=False):
         self.scheduler.fusable_deps.update(self.read_writes.writes)
-
-    def output_numel_hint(self):
-        _, (numel, _) = self.group
-        if isinstance(numel, tuple):  # CPU
-            numel = sympy_product(numel)
-        return V.graph.sizevars.size_hint(numel)
 
     def get_ranges(self):
         return self._sizes
@@ -503,6 +490,9 @@ class FusedSchedulerNode(BaseSchedulerNode):
     def get_name(self) -> str:
         return "_".join([x.get_name() for x in self.snodes])
 
+    def get_first_name(self) -> str:
+        return self.snodes[0].get_name()
+
     def get_names(self) -> Set[str]:
         return functools.reduce(set.union, [x.get_names() for x in self.snodes])
 
@@ -556,9 +546,6 @@ class FusedSchedulerNode(BaseSchedulerNode):
         raise NotImplementedError()
 
     def can_remove_buffer(self, check_group):
-        raise NotImplementedError
-
-    def output_numel_hint(self):
         raise NotImplementedError
 
 
@@ -933,6 +920,7 @@ class Scheduler:
         self.pending_buffer_names = set()
         self.check_can_free = set()
         self.fusable_deps = set()
+        self.name_to_fused_node = None
         for node in nodes:
             assert (
                 node.origins is not None
@@ -964,20 +952,25 @@ class Scheduler:
         self.topological_sort_schedule()
         self.compute_predecessors()
         self.dead_node_elimination()
-        self.num_orig_nodes = len(self.nodes)
-        self.numel_hints = {n.get_name(): n.output_numel_hint() for n in self.nodes}
-        self.numel_hints.update(
-            {
-                n.get_name(): V.graph.sizevars.size_hint(n.get_numel())
-                for n in V.graph.graph_inputs.values()
-            }
-        )
-        self.numel_hints.update({k: v.numel() for k, v in V.graph.constants.items()})
-        self.print_nodes()
-        self.fuse_nodes()
-        self.topological_sort_schedule()
-        self.print_nodes()
 
+        if log.isEnabledFor(logging.INFO):
+            log.info("PRE FUSION:")
+            self.print_nodes()
+
+        self.num_orig_nodes = len(self.nodes)
+        self.name_to_fused_node = {n.get_name(): n for n in self.nodes}
+        self.fuse_nodes()
+
+        if log.isEnabledFor(logging.INFO):
+            log.info("POST FUSION:")
+            self.print_nodes()
+
+        self.enqueue(self.nodes)
+
+        self.draw_graph()
+
+    def draw_graph(self):
+        """Generate an image of the graph for debugging"""
         if INDUCTOR_SCHEDULER_GRAPH:
             try:
                 from functorch.compile import get_graph_being_compiled
@@ -991,7 +984,6 @@ class Scheduler:
                 graph_name = "model"
 
             draw_buffers(self.nodes, graph_name, print_graph=True)
-        self.enqueue(self.nodes)
 
     def print_nodes(self):
         log.info("Nodes:")
@@ -1104,7 +1096,7 @@ class Scheduler:
                 updated_nodes.append(node)
             else:
                 # dead code
-                log.debug("removed dead node: %s", node.get_name())
+                log.info("removed dead node: %s", node.get_name())
                 V.graph.removed_buffers.add(node.get_name())
         self.nodes = updated_nodes
 
@@ -1145,11 +1137,41 @@ class Scheduler:
     def fuse_nodes(self):
         """
         Mutates self.nodes to combine nodes into FusedSchedulerNodes.
+        """
+        for _ in range(config.fusion_passes):
+            old_len = len(self.nodes)
+            self.fuse_nodes_once()
+            if len(self.nodes) == old_len:
+                break
+
+    def fuse_nodes_once(self):
+        """
+        Mutates self.nodes to combine nodes into FusedSchedulerNodes.
 
         This relies on two key functions to control the logic:
             - self.can_fuses(): checks if a fusion is legal
             - self.score_fusion(): assigns priority to a given fusion
         """
+        fused_nodes = set(self.nodes)
+        for node1, node2 in self.get_possible_fusions():
+            node1 = self.name_to_fused_node[node1.get_first_name()]
+            node2 = self.name_to_fused_node[node2.get_first_name()]
+            if self.can_fuse(node1, node2) and not self.will_fusion_create_cycle(
+                node1, node2
+            ):
+                log.info("Fusing %s + %s", node1.get_name(), node2.get_name())
+                node3 = FusedSchedulerNode.fuse(node1, node2)
+                # node3.log_details()
+                fused_nodes.remove(node1)
+                fused_nodes.remove(node2)
+                fused_nodes.add(node3)
+                self.name_to_fused_node.update(
+                    {n.get_name(): node3 for n in node3.get_nodes()}
+                )
+        self.nodes = sorted(fused_nodes, key=lambda x: x.min_order)
+        self.topological_sort_schedule()
+
+    def get_possible_fusions(self):
         possible_fusions = []
         for node1_index, node1 in enumerate(self.nodes):
             for node2 in self.nodes[node1_index + 1 :]:
@@ -1158,59 +1180,63 @@ class Scheduler:
                 elif self.can_fuse(node2, node1):
                     # epilogue fusions are order dependent
                     possible_fusions.append((node2, node1))
+        return sorted(possible_fusions, key=self.score_fusion_key, reverse=True)
 
-        def will_create_cycle(src, dst):
-            # Finds whether there's a path from src to dst caused by fusion
-            def check(node):
-                if isinstance(node, FusedSchedulerNode) and node not in visited:
-                    visited.add(node)
-                    return bool(combined_names & node.recursive_predecessors) or any(
-                        check(name_to_node[n])
-                        for n in node.recursive_predecessors - combined_predecessors
-                    )
-                return False
+    def will_fusion_create_cycle(self, node1, node2):
+        """Finds whether there's a path from src to dst caused indirectly by fusion"""
 
-            visited = set()
-            combined_names = src.get_names() | dst.get_names()
-            combined_predecessors = (
-                src.recursive_predecessors | dst.recursive_predecessors
-            ) - combined_names
-            return any(check(name_to_node[n]) for n in combined_predecessors)
+        def check(node):
+            if isinstance(node, FusedSchedulerNode) and node not in visited:
+                visited.add(node)
+                return bool(combined_names & node.recursive_predecessors) or any(
+                    check(self.name_to_fused_node[n])
+                    for n in node.recursive_predecessors - combined_predecessors
+                )
+            return False
 
-        name_to_node = {n.get_name(): n for n in self.nodes}
-        fused_nodes = set(self.nodes)
-        for node1, node2 in sorted(
-            possible_fusions, key=self.score_fusion_key, reverse=True
-        ):
-            node1 = name_to_node[node1.get_name()]
-            node2 = name_to_node[node2.get_name()]
-            if self.can_fuse(node1, node2) and not will_create_cycle(node1, node2):
-                log.info("Fusing %s + %s", node1.get_name(), node2.get_name())
-                node3 = FusedSchedulerNode.fuse(node1, node2)
-                node3.log_details()
-                fused_nodes.remove(node1)
-                fused_nodes.remove(node2)
-                fused_nodes.add(node3)
-                name_to_node.update({n.get_name(): node3 for n in node3.get_nodes()})
-
-        self.nodes = list(sorted(fused_nodes, key=lambda x: x.min_order))
+        visited = set()
+        combined_names = node1.get_names() | node2.get_names()
+        combined_predecessors = (
+            node1.recursive_predecessors | node2.recursive_predecessors
+        ) - combined_names
+        return any(check(self.name_to_fused_node[n]) for n in combined_predecessors)
 
     def can_fuse(self, node1: BaseSchedulerNode, node2: BaseSchedulerNode):
         """
         Determine if it is possible to combine node1 and node2 into a
         single fused node.
         """
+
         if node1 is node2:
             return False
         if isinstance(node1, (ExternKernelSchedulerNode, NopKernelSchedulerNode)):
+            # TODO(jansel): fuse templates
             return False
         if isinstance(node2, (ExternKernelSchedulerNode, NopKernelSchedulerNode)):
             return False
-        if node1.group != node2.group:
+        if node2.get_names() & node1.recursive_predecessors:
             return False
-        if self.are_nodes_dependent(node1, node2):
+        if not config.aggressive_fusion and self.score_fusion_memory(node1, node2) == 0:
             return False
-        return True
+
+        device = node1.get_device()
+        if device != node2.get_device():
+            return False
+
+        node1_names = node1.get_names()
+        if node1_names & node2.recursive_predecessors:
+            # node2 depends on node1 outputs
+            remaining_deps = {
+                dep.name for dep in node2.unmet_dependencies - node1.read_writes.writes
+            }
+            if remaining_deps & node1_names:
+                return False  # MemoryDeps didn't match
+            for name in remaining_deps:
+                if node1_names & self.name_to_fused_node[name].recursive_predecessors:
+                    return False
+            return self.get_backend(device).can_fuse_vertical(node1, node2)
+        else:
+            return self.get_backend(device).can_fuse_horizontal(node1, node2)
 
     def score_fusion(self, node1: BaseSchedulerNode, node2: BaseSchedulerNode):
         """
@@ -1218,22 +1244,20 @@ class Scheduler:
         and node2.  When different fusions conflict with each other,
         this is the way we decide what order to run them in.
         """
+        return (
+            self.score_fusion_type(node1, node2),
+            self.score_fusion_memory(node1, node1),
+            self.score_fusion_proximity(node1, node2),
+        )
+
+    def score_fusion_type(self, node1, node2):
+        """
+        The first term in our fusion score that is based on the type of fusion.
+        """
 
         class FusionTypes:
             reduction_reduction_horizontal = 10  # reduce loops in reductions
             other = 0
-
-        # prioritize reads saved
-        common_reads = node1.read_writes.reads & (
-            node2.read_writes.reads | node2.read_writes.writes
-        )
-        memory_score = sum(self.numel_hints[dep.name] for dep in common_reads)
-
-        # prioritize fusions closer together in original order
-        distance_score = -max(
-            abs(node1.min_order - node2.max_order),
-            abs(node2.min_order - node1.max_order),
-        )
 
         idep = not self.are_nodes_dependent(node1, node2)
 
@@ -1242,7 +1266,25 @@ class Scheduler:
         else:
             type_score = FusionTypes.other
 
-        return (type_score, memory_score, distance_score)
+        return type_score
+
+    def score_fusion_memory(self, node1, node2):
+        """
+        The second term in our fusion score that estimates number of saved memory operations.
+        """
+        common_reads = node1.read_writes.reads & (
+            node2.read_writes.reads | node2.read_writes.writes
+        )
+        return sum(dep.numel_hint() for dep in common_reads)
+
+    def score_fusion_proximity(self, node1, node2):
+        """
+        The third term in our fusion score that prioritize fusions closer together in original order.
+        """
+        return -max(
+            abs(node1.min_order - node2.max_order),
+            abs(node2.min_order - node1.max_order),
+        )
 
     def score_fusion_key(self, nodes):
         """
@@ -1310,6 +1352,7 @@ class Scheduler:
         # Assign a special value instead of deleting the entry
         # because we still rely on output_buffers's length to
         # generate unique arg name.
+        log.debug("remove_buffer(%r)", name)
         V.kernel.args.output_buffers[name] = "REMOVED"
         V.graph.removed_buffers.add(name)
 
@@ -1466,6 +1509,7 @@ class Scheduler:
                 node.run(self.codegen_extern_call)
             else:
                 assert isinstance(node, (FusedSchedulerNode, SchedulerNode))
+                log.info("RUNNING %s: %s", node, node.get_nodes())
                 self.get_backend(device).codegen_nodes(node.get_nodes())
 
         self.flush()

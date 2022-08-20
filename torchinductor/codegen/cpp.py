@@ -391,7 +391,7 @@ class CppKernel(Kernel):
     def codegen_loops(self, code, worksharing):
         threads = config.cpp.threads
         if threads < 1:
-            threads = multiprocessing.cpu_count() // 2
+            threads = multiprocessing.cpu_count()
 
         loops = [LoopLevel(var, size) for var, size in zip(self.itervars, self.ranges)]
         loops, reductions = LoopNest(loops[: self.reduction_depth]), LoopNest(
@@ -405,13 +405,6 @@ class CppKernel(Kernel):
                 reductions.loops[-1].simd = True
             else:
                 loops.loops[-1].simd = True
-
-        # limit thread count for smaller sizes
-        work = self.size_hint()
-        if work < 2**18:
-            threads = min(threads, 4)
-        elif work < 2**22:
-            threads = min(threads, 8)
 
         par_depth = 0
         reduction_par_depth = 0
@@ -528,6 +521,35 @@ class CppScheduling:
 
         kernel_group.finalize_kernel(kernel, scheduler)
 
+    def codegen_nodes(self, nodes):
+        kernel_group = self.kernel_group
+        scheduler = self.scheduler
+        _, (group, reduction_group) = max(
+            nodes, key=lambda x: int(x.is_reduction())
+        ).group
+        in_suffix = False
+
+        with scheduler.kernel(kernel_group.new_kernel()) as kernel:
+            vars, reduction_vars = kernel.set_ranges(group, reduction_group)
+
+            for node in nodes:
+                if node.group[1] == (group, reduction_group):
+                    assert not in_suffix
+                    node.run(vars, reduction_vars)
+                    node.mark_fusable()
+                else:
+                    in_suffix = True
+                    assert node.group[1] == (
+                        group,
+                        (),
+                    ), f"unexpected group: {node.group[1]} != {group}, {reduction_group}"
+                    # we can fuse in some extra pointwise into the suffix
+                    with kernel.write_to_suffix():
+                        node.run(vars, ())
+                        node.mark_fusable()
+
+        kernel_group.finalize_kernel(kernel, scheduler)
+
     def flush(self):
         self.kernel_group.codegen_define_and_call(V.graph.wrapper_code)
         self.kernel_group = KernelGroup()
@@ -551,11 +573,8 @@ class KernelGroup:
         code = self.loops_code
         ws = self.ws
         new_kernel.codegen_loops(code, ws)
-        if not ws.in_parallel:
-            scheduler.barrier()
-        if not scheduler.runnable_nodes and scheduler.pending_buffer_names:
-            ws.barrier()
-            scheduler.barrier()
+        # TODO(jansel): we shouldn't always need a barrier here
+        scheduler.barrier()
 
     def codegen_define_and_call(self, wrapper):
         self.stack.close()
@@ -590,7 +609,6 @@ class WorkSharing:
         self.code = code
         self.in_parallel = False
         self.num_threads = None
-        self.need_barrier = False
         self.stack = contextlib.ExitStack()
 
     def parallel(self, threads):
@@ -600,19 +618,16 @@ class WorkSharing:
         if not self.in_parallel:
             self.num_threads = threads
             self.in_parallel = True
-            self.code.writeline(f"#pragma omp parallel num_threads({threads})")
+            if threads == multiprocessing.cpu_count():
+                self.code.writeline(f"#pragma omp parallel")
+            else:
+                self.code.writeline(f"#pragma omp parallel num_threads({threads})")
             self.stack.enter_context(self.code.indent())
-        elif self.need_barrier:
-            self.code.writeline("#pragma omp barrier")
-        self.need_barrier = False
 
     def single(self):
         if self.in_parallel:
-            self.code.writeline("#pragma omp single nowait")
+            self.code.writeline("#pragma omp single")
         return self.in_parallel
-
-    def barrier(self):
-        self.need_barrier = True
 
     def close(self):
         self.stack.close()
@@ -654,7 +669,7 @@ class LoopLevel:
         simd = f"simd simdlen({config.cpp.simdlen})"
         if self.parallel:
             # TODO(jansel): look into chunk size and other schedules
-            line1 = f"#pragma omp for nowait{reduction}"
+            line1 = f"#pragma omp for{reduction}"
             if self.parallel > 1:
                 line1 += f" collapse({self.parallel})"
             if self.simd:
@@ -692,4 +707,6 @@ class LoopNest:
     def codegen(self, code, stack):
         for loop in self.loops:
             code.writelines(loop.lines())
+            stack.enter_context(code.indent())
+        else:
             stack.enter_context(code.indent())

@@ -111,7 +111,7 @@ class ReadWrites:
     reads: Set[Dep]
     writes: Set[Dep]
     index_exprs: Set[IndexExprDep]
-    range_vars: List[sympy.Expr]
+    range_vars: List[sympy.Expr] = None
     var_ranges: Optional[VarRanges] = None
 
     def rename(self, renames: typing.Dict[str, str]) -> "ReadWrites":
@@ -131,6 +131,16 @@ class ReadWrites:
             self.index_exprs,
             self.range_vars,
             self.var_ranges,
+        )
+
+    def merge(self, other):
+        reads = set.union(self.reads, other.reads)
+        writes = set.union(self.writes, other.writes)
+        index_exprs = set.union(self.index_exprs, other.index_exprs)
+        return ReadWrites(
+            reads - writes,
+            writes,
+            index_exprs,
         )
 
 

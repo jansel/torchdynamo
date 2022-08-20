@@ -2607,7 +2607,7 @@ class FallbackKernel(ExternKernelAlloc):
 
         if isinstance(example_output, (list, tuple)):
             packed = FallbackKernel(
-                MultiOutputLayout(),
+                MultiOutputLayout(tensor_args[0].get_device()),
                 kernel,
                 tensor_args,
                 non_tensor_args,
@@ -2648,8 +2648,9 @@ class FallbackKernel(ExternKernelAlloc):
         return super().apply_constraint()
 
 
+@dataclasses.dataclass
 class MultiOutputLayout(IRNode):
-    pass
+    device: torch.device
 
 
 class MultiOutput(ExternKernel):

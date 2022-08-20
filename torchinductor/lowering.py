@@ -16,6 +16,8 @@ from torch._prims_common import is_integer_dtype
 from . import config
 from . import ir
 from . import overrides
+from .decomposition import decompositions
+from .decomposition import get_decompositions
 from .ir import ExpandView
 from .ir import PermuteView
 from .ir import Pointwise
@@ -701,6 +703,14 @@ def bmm(a: TensorBox, b: TensorBox):
 
 
 def make_fallback(kernel):
+    assert (
+        kernel not in decompositions
+    ), f"both a fallback and a decomp for same kernel: {kernel}"
+    if get_decompositions([kernel]):
+        logging.warning(
+            f"make_fallback({kernel}): a decomposition exists, we should switch to it"
+        )
+
     add_needs_realized_inputs(kernel)
 
     @register_lowering(kernel, type_promote=False)

@@ -10,6 +10,7 @@ from typing import Any
 from typing import Dict
 from typing import List
 from typing import Optional
+from typing import Set
 
 import numpy as np
 import sympy
@@ -68,6 +69,7 @@ class BaseSchedulerNode:
         self.node: ir.Buffer = node
         self.users: Optional[List[NodeUser]] = None
         self.inverse_users: List[BaseSchedulerNode] = []
+        self.recursive_predecessors: Optional[Set[str]] = None
         self.set_read_writes(node.get_read_writes())
 
     def __repr__(self):
@@ -109,8 +111,14 @@ class BaseSchedulerNode:
             if dep.name not in self.scheduler.available_buffer_names
         }
 
-    def get_name(self):
+    def get_name(self) -> str:
         return self.node.get_name()
+
+    def get_names(self) -> List[str]:
+        return [self.get_name()]
+
+    def get_nodes(self) -> List["BaseSchedulerNode"]:
+        return [self]
 
     def get_sort_order(self):
         name = self.get_name()
@@ -185,7 +193,6 @@ class ExternKernelSchedulerNode(BaseSchedulerNode):
         return self._sizes
 
     def run(self, codegen_extern_call):
-        log.info(f"RUN EXTERN {self.get_name()}")
         self.allocate()
         self.scheduler.run_count += 1
         self.scheduler.pending_buffer_names.add(self.get_name())
@@ -203,7 +210,6 @@ class NopKernelSchedulerNode(BaseSchedulerNode):
         return False
 
     def run(self):
-        log.info(f"RUN NOP {self.get_name()}")
         self.allocate()
         self.scheduler.run_count += 1
         self.scheduler.pending_buffer_names.add(self.get_name())
@@ -347,7 +353,6 @@ class SchedulerNode(BaseSchedulerNode):
         self.codegen(index_vars)
 
     def mark_run(self):
-        log.info(f"RUN {self.get_name()}")
         self.allocate()
         self.scheduler.run_count += 1
         self.scheduler.pending_buffer_names.add(self.get_name())
@@ -415,20 +420,32 @@ class FusedSchedulerNode(BaseSchedulerNode):
         self.node = None  # type: ignore[assignment]
         self.users = None
         self.inverse_users = []
-        self.group = snodes[0].group
-        reads = set(self.snodes[0].read_writes.reads)
-        for snode in snodes[1:]:
-            reads |= snode.read_writes.reads
-            assert self.group == snode.group
-        node_bufs = set([node.get_name() for node in snodes])
-        reads = set([read for read in reads if read.name not in node_bufs])
-        # self.read_writes field shouldn't really be needed for much, but it's
-        # useful for visualization to track what buffers it reads from
-        self.set_read_writes(dependencies.ReadWrites(list(reads), None, None, None))  # type: ignore[arg-type]
-        self.prune_deps()
+        self.group = max(snodes, key=lambda x: int(x.is_reduction())).group
+        self.recursive_predecessors = functools.reduce(
+            set.union, [x.recursive_predecessors for x in snodes]
+        )
+        self.set_read_writes(
+            functools.reduce(
+                dependencies.ReadWrites.merge, [x.read_writes for x in snodes]
+            )
+        )
+        names = set(self.get_names())
+        self.unmet_dependencies = {
+            dep
+            for dep in functools.reduce(
+                set.union, [x.unmet_dependencies for x in snodes]
+            )
+            if dep.name not in names
+        } - self.read_writes.writes
 
-    def get_name(self):
+    def get_name(self) -> str:
         return "_".join([x.get_name() for x in self.snodes])
+
+    def get_names(self) -> List[str]:
+        return [x.get_name() for x in self.get_nodes()]
+
+    def get_nodes(self) -> List[BaseSchedulerNode]:
+        return list(itertools.chain.from_iterable(x.get_nodes() for x in self.snodes))
 
     def __repr__(self):
         return f"{type(self).__name__}(nodes={self.get_name()})"
@@ -882,11 +899,11 @@ class Scheduler:
         # mutation_real_name: maps back to the original name for codegen
         self.mutation_renames = {}
 
-        self.compute_users()
+        self.compute_dependencies()
+        self.topological_sort_schedule()
+        self.compute_predecessors()
         self.dead_node_elimination()
         self.num_orig_nodes = len(self.nodes)
-        if config.prefuse_nodes:
-            self.nodes = prefuse_nodes(self.nodes)
 
         if INDUCTOR_SCHEDULER_GRAPH:
             try:
@@ -903,7 +920,11 @@ class Scheduler:
             draw_buffers(self.nodes, graph_name, print_graph=True)
         self.enqueue(self.nodes)
 
-    def compute_users(self):
+    def compute_dependencies(self):
+        """
+        Create dependency edges between nodes, handling aliasing and
+        mutation properly.
+        """
         name_to_users = collections.defaultdict(list)
 
         # handle aliasing by using python aliasing in name_to_users
@@ -1006,8 +1027,38 @@ class Scheduler:
             else:
                 # dead code
                 log.debug("removed dead node: %s", node.get_name())
-                V.graph.removed_buffers.add(node.get_name())
+                # V.graph.removed_buffers.add(node.get_name())
         self.nodes = updated_nodes
+
+    def topological_sort_schedule(self):
+        seen = set()
+        name_to_node = dict()
+        result = []
+
+        def visit(n):
+            if n not in seen:
+                seen.add(n)
+                for dep in n.unmet_dependencies:
+                    visit(name_to_node[dep.name])
+                result.append(n)
+
+        for node in self.nodes:
+            for name in node.get_names():
+                name_to_node[name] = node
+        for node in self.nodes:
+            visit(node)
+        self.nodes = result
+
+    def compute_predecessors(self):
+        # note self.nodes is topologically sorted
+        name_to_predecessors = {}
+        for node in self.nodes:
+            recursive_predecessors = set()
+            for dep in node.unmet_dependencies:
+                recursive_predecessors.add(dep.name)
+                recursive_predecessors |= name_to_predecessors[dep.name]
+            name_to_predecessors[node.get_name()] = recursive_predecessors
+            node.recursive_predecessors = recursive_predecessors
 
     def enqueue(self, node):
         if isinstance(node, (tuple, list)):
@@ -1108,7 +1159,6 @@ class Scheduler:
         self.check_can_free.clear()
 
     def kernel(self, kernel):
-        log.info("NEW KERNEL")
         self.fusable_deps.clear()
         self.kernels.append(kernel)
 
@@ -1212,9 +1262,20 @@ class Scheduler:
         return self.backends[device]
 
     def codegen(self):
-        for device, group in self.iter_runnable_groups():
+        for node in self.nodes:
+            if isinstance(node, NopKernelSchedulerNode):
+                node.run()
+                continue
+
+            device = node.get_device()
             if device != self.current_device:
                 self.flush()
                 self.current_device = device
-            self.get_backend(device).codegen(*group)
+
+            if isinstance(node, ExternKernelSchedulerNode):
+                node.run(self.codegen_extern_call)
+            else:
+                assert isinstance(node, (FusedSchedulerNode, SchedulerNode))
+                self.get_backend(device).codegen_nodes(node.get_nodes())
+
         self.flush()

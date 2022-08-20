@@ -302,6 +302,7 @@ def template_codegen(scheduler, scheduler_node):
         tile1, tile2, _ = groups
         fusable_group = tile1 * tile2
 
+        """
         # Add pointwise with compatible dimensions
         for node in scheduler.pop_group(
             (fusable_group, sympy.Integer(1)),
@@ -330,12 +331,12 @@ def template_codegen(scheduler, scheduler_node):
                 could_remove_kernel_buf = True
             except CantSplit:
                 reschedule.append(node)
-
         else:
             for node in scheduler.pop_group(groups):
                 # scheduler.maybe_remove_buffer(node, check_group=is_group_matching)
                 node.run(*kernel.set_ranges(*node.get_ranges()))
                 node.mark_fusable()
+        """
 
         # TODO: reduction
 

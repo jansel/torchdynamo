@@ -89,6 +89,8 @@ def freeze_inputs(f):
     """
 
     def freeze_value(x):
+        if isinstance(x, (immutable_dict, immutable_list)):
+            return x
         if isinstance(x, list):
             return immutable_list(x)
         if isinstance(x, dict):

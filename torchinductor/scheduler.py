@@ -24,6 +24,7 @@ from .codegen.triton_template import template_codegen
 from .dependencies import MemoryDep
 from .dependencies import StarDep
 from .sizevars import SimplifyIndexing
+from .utils import sympy_product
 from .virtualized import V
 
 template_kernels = [ir.Convolution, ir.MatrixMultiply]
@@ -44,6 +45,16 @@ def should_use_template(node: ir.ExternKernel):
         elif isinstance(node, ir.MatrixMultiply):
             return node.kernel != "aten.mm.out"
     return False
+
+
+def precompute_method(obj, method):
+    result = getattr(obj, method)()
+    setattr(obj, method, lambda: result)
+
+
+def precompute_methods(obj, methods):
+    for method in methods:
+        precompute_method(obj, method)
 
 
 class OutputNode:
@@ -71,9 +82,33 @@ class BaseSchedulerNode:
         self.inverse_users: List[BaseSchedulerNode] = []
         self.recursive_predecessors: Optional[Set[str]] = None
         self.set_read_writes(node.get_read_writes())
+        self.min_order = None
+        self.max_order = None
 
     def __repr__(self):
         return f"{type(self).__name__}(name={self.get_name()!r})"
+
+    def node_type(self):
+        if self.is_reduction():
+            return "reduction"
+        if self.is_template():
+            return "template"
+        if isinstance(self, SchedulerNode):
+            return "pointwise"
+        if isinstance(self, ExternKernelSchedulerNode):
+            return "extern"
+        return "other"
+
+    def log_details(self):
+        log.info(
+            "%s:\n  unmet_dependencies = %s\n  recursive_predecessors = %s",
+            self,
+            self.unmet_dependencies,
+            self.recursive_predecessors,
+        )
+
+    def output_numel_hint(self):
+        return 1
 
     def update_mutated_names(self, renames: Dict[str, str]):
         self.set_read_writes(self.read_writes.rename(renames))
@@ -114,8 +149,8 @@ class BaseSchedulerNode:
     def get_name(self) -> str:
         return self.node.get_name()
 
-    def get_names(self) -> List[str]:
-        return [self.get_name()]
+    def get_names(self) -> Set[str]:
+        return set([self.get_name()])
 
     def get_nodes(self) -> List["BaseSchedulerNode"]:
         return [self]
@@ -130,6 +165,9 @@ class BaseSchedulerNode:
         return self.node.get_device()
 
     def is_reduction(self):
+        return False
+
+    def is_template(self):
         return False
 
     def can_inplace(self, read_dep: dependencies.MemoryDep):
@@ -191,6 +229,11 @@ class ExternKernelSchedulerNode(BaseSchedulerNode):
 
     def get_ranges(self):
         return self._sizes
+
+    def output_numel_hint(self):
+        if hasattr(self, "group"):
+            _, (numel, _) = self.group
+            return V.graph.sizevars.size_hint(numel)
 
     def run(self, codegen_extern_call):
         self.allocate()
@@ -263,16 +306,35 @@ class SchedulerNode(BaseSchedulerNode):
         ) = node.simplify_and_reorder()
 
         self.group = (node.get_device(), group_fn(self._sizes))
+
         self.set_read_writes(
             dependencies.extract_read_writes(self._body, *self._sizes, normalize=True)
         )
+        """
+        if self.is_reduction():
+            # reduction has last (reduced) dim in its sizes, and some
+            # downstream dependencies get confused by it
+            self.read_writes.writes = self.read_writes.writes | {
+                w.strip_last_size() for w in self.read_writes.writes
+            }
+            # reduction not on the last dim swaps the sizes, and downstream
+            # dependencies expect unswapped
+            # TODO swapping sizes doesn't work, leads to
+            # File "/scratch/ngimel/work/repos/torchdynamo/torchinductor/sizevars.py", line 130, in guard_equals
+            # if len(right.free_symbols) < len(left.free_symbols):
+            # AttributeError: 'int' object has no attribute 'free_symbols'
+            # even though memory dep looks correct
+            # self.read_writes.writes = self.read_writes.writes | {
+            #     w.maybe_swap_sizes() for w in self.read_writes.writes
+            # }
+        """
 
     def can_remove_buffer(self, check_group):
         if (
             self.is_reduction()
             and len(self.users) == 1
             and isinstance(self.users[0].node, SchedulerNode)
-            and len(self.users[0].node.unmet_dependencies) == 1
+            and len(self.users[0].node.unmet_dependencies) == 1  # XX update this
         ):
             user = self.users[0].node
             if not check_group(user):
@@ -290,23 +352,12 @@ class SchedulerNode(BaseSchedulerNode):
 
     def mark_fusable(self, broadcast_after_reduce=False):
         self.scheduler.fusable_deps.update(self.read_writes.writes)
-        if self.is_reduction():
-            # reduction has last (reduced) dim in its sizes, and some
-            # downstream dependencies get confused by it
-            self.scheduler.fusable_deps.update(
-                w.strip_last_size() for w in self.read_writes.writes
-            )
-            # reduction not on the last dim swaps the sizes, and downstream
-            # dependencies expect unswapped
-            # TODO swapping sizes doesn't work, leads to
-            # File "/scratch/ngimel/work/repos/torchdynamo/torchinductor/sizevars.py", line 130, in guard_equals
-            # if len(right.free_symbols) < len(left.free_symbols):
-            # AttributeError: 'int' object has no attribute 'free_symbols'
-            # even though memory dep looks correct
 
-            # self.scheduler.fusable_deps.update(
-            #     w.maybe_swap_sizes() for w in self.read_writes.writes
-            # )
+    def output_numel_hint(self):
+        _, (numel, _) = self.group
+        if isinstance(numel, tuple):  # CPU
+            numel = sympy_product(numel)
+        return V.graph.sizevars.size_hint(numel)
 
     def get_ranges(self):
         return self._sizes
@@ -413,6 +464,10 @@ class FusedSchedulerNode(BaseSchedulerNode):
     its unmet dependencies as the union of its constituent nodes.
     """
 
+    @classmethod
+    def fuse(cls, node1, node2):
+        return cls(node1.scheduler, node1.get_nodes() + node2.get_nodes())
+
     def __init__(self, scheduler: "Scheduler", snodes: List[SchedulerNode]):
         # NB: No need to call super().__init__() because we don't need to re-use any of its logic.
         self.snodes = snodes
@@ -437,15 +492,22 @@ class FusedSchedulerNode(BaseSchedulerNode):
             )
             if dep.name not in names
         } - self.read_writes.writes
+        self.min_order = min([x.min_order for x in self.snodes])
+        self.max_order = max([x.max_order for x in self.snodes])
+
+        # O(n) methods => O(1) methods
+        precompute_methods(
+            self, ["get_name", "get_names", "is_reduction", "is_template"]
+        )
 
     def get_name(self) -> str:
         return "_".join([x.get_name() for x in self.snodes])
 
-    def get_names(self) -> List[str]:
-        return [x.get_name() for x in self.get_nodes()]
+    def get_names(self) -> Set[str]:
+        return functools.reduce(set.union, [x.get_names() for x in self.snodes])
 
     def get_nodes(self) -> List[BaseSchedulerNode]:
-        return list(itertools.chain.from_iterable(x.get_nodes() for x in self.snodes))
+        return self.snodes
 
     def __repr__(self):
         return f"{type(self).__name__}(nodes={self.get_name()})"
@@ -454,6 +516,15 @@ class FusedSchedulerNode(BaseSchedulerNode):
         for node in self.snodes:
             node.prune_deps()
         super().prune_deps()
+
+    def is_reduction(self):
+        return any(x.is_reduction() for x in self.snodes)
+
+    def is_template(self):
+        return any(x.is_template() for x in self.snodes)
+
+    def get_device(self):
+        return self.group[0]
 
     # None of these need to be implemented, as a FusedSchedulerNode is just an
     # abstraction for scheduling purposes
@@ -472,12 +543,6 @@ class FusedSchedulerNode(BaseSchedulerNode):
     def get_mutations(self):
         raise NotImplementedError
 
-    def get_device(self):
-        raise NotImplementedError
-
-    def is_reduction(self):
-        raise NotImplementedError
-
     def can_inplace(self, read_dep: dependencies.MemoryDep):
         raise NotImplementedError
 
@@ -491,6 +556,9 @@ class FusedSchedulerNode(BaseSchedulerNode):
         raise NotImplementedError()
 
     def can_remove_buffer(self, check_group):
+        raise NotImplementedError
+
+    def output_numel_hint(self):
         raise NotImplementedError
 
 
@@ -875,14 +943,7 @@ class Scheduler:
                 group_fn = self.get_backend(node.get_device()).group_fn
                 self.nodes.append(SchedulerNode(self, node, group_fn))
             elif isinstance(node, ir.ExternKernel):
-                group_fn = None
-                if should_use_template(node):
-                    if isinstance(node, ir.Convolution):
-                        group_fn = self.get_backend(node.get_device()).group_fn_NHW_C
-                    elif isinstance(node, ir.MatrixMultiply):
-                        group_fn = self.get_backend(node.get_device()).group_fn_M_N
-                    else:
-                        group_fn = self.get_backend(node.get_device()).group_fn
+                group_fn = self.get_backend(node.get_device()).group_fn
                 self.nodes.append(ExternKernelSchedulerNode(self, node, group_fn))
             else:
                 assert False, node
@@ -904,6 +965,18 @@ class Scheduler:
         self.compute_predecessors()
         self.dead_node_elimination()
         self.num_orig_nodes = len(self.nodes)
+        self.numel_hints = {n.get_name(): n.output_numel_hint() for n in self.nodes}
+        self.numel_hints.update(
+            {
+                n.get_name(): V.graph.sizevars.size_hint(n.get_numel())
+                for n in V.graph.graph_inputs.values()
+            }
+        )
+        self.numel_hints.update({k: v.numel() for k, v in V.graph.constants.items()})
+        self.print_nodes()
+        self.fuse_nodes()
+        self.topological_sort_schedule()
+        self.print_nodes()
 
         if INDUCTOR_SCHEDULER_GRAPH:
             try:
@@ -919,6 +992,11 @@ class Scheduler:
 
             draw_buffers(self.nodes, graph_name, print_graph=True)
         self.enqueue(self.nodes)
+
+    def print_nodes(self):
+        log.info("Nodes:")
+        for node in self.nodes:
+            node.log_details()
 
     def compute_dependencies(self):
         """
@@ -1027,7 +1105,7 @@ class Scheduler:
             else:
                 # dead code
                 log.debug("removed dead node: %s", node.get_name())
-                # V.graph.removed_buffers.add(node.get_name())
+                V.graph.removed_buffers.add(node.get_name())
         self.nodes = updated_nodes
 
     def topological_sort_schedule(self):
@@ -1059,6 +1137,129 @@ class Scheduler:
                 recursive_predecessors |= name_to_predecessors[dep.name]
             name_to_predecessors[node.get_name()] = recursive_predecessors
             node.recursive_predecessors = recursive_predecessors
+
+        for order, node in enumerate(self.nodes):
+            node.min_order = order
+            node.max_order = order
+
+    def fuse_nodes(self):
+        """
+        Mutates self.nodes to combine nodes into FusedSchedulerNodes.
+
+        This relies on two key functions to control the logic:
+            - self.can_fuses(): checks if a fusion is legal
+            - self.score_fusion(): assigns priority to a given fusion
+        """
+        possible_fusions = []
+        for node1_index, node1 in enumerate(self.nodes):
+            for node2 in self.nodes[node1_index + 1 :]:
+                if self.can_fuse(node1, node2):
+                    possible_fusions.append((node1, node2))
+                elif self.can_fuse(node2, node1):
+                    # epilogue fusions are order dependent
+                    possible_fusions.append((node2, node1))
+
+        def will_create_cycle(src, dst):
+            # Finds whether there's a path from src to dst caused by fusion
+            def check(node):
+                if isinstance(node, FusedSchedulerNode) and node not in visited:
+                    visited.add(node)
+                    return bool(combined_names & node.recursive_predecessors) or any(
+                        check(name_to_node[n])
+                        for n in node.recursive_predecessors - combined_predecessors
+                    )
+                return False
+
+            visited = set()
+            combined_names = src.get_names() | dst.get_names()
+            combined_predecessors = (
+                src.recursive_predecessors | dst.recursive_predecessors
+            ) - combined_names
+            return any(check(name_to_node[n]) for n in combined_predecessors)
+
+        name_to_node = {n.get_name(): n for n in self.nodes}
+        fused_nodes = set(self.nodes)
+        for node1, node2 in sorted(
+            possible_fusions, key=self.score_fusion_key, reverse=True
+        ):
+            node1 = name_to_node[node1.get_name()]
+            node2 = name_to_node[node2.get_name()]
+            if self.can_fuse(node1, node2) and not will_create_cycle(node1, node2):
+                log.info("Fusing %s + %s", node1.get_name(), node2.get_name())
+                node3 = FusedSchedulerNode.fuse(node1, node2)
+                node3.log_details()
+                fused_nodes.remove(node1)
+                fused_nodes.remove(node2)
+                fused_nodes.add(node3)
+                name_to_node.update({n.get_name(): node3 for n in node3.get_nodes()})
+
+        self.nodes = list(sorted(fused_nodes, key=lambda x: x.min_order))
+
+    def can_fuse(self, node1: BaseSchedulerNode, node2: BaseSchedulerNode):
+        """
+        Determine if it is possible to combine node1 and node2 into a
+        single fused node.
+        """
+        if node1 is node2:
+            return False
+        if isinstance(node1, (ExternKernelSchedulerNode, NopKernelSchedulerNode)):
+            return False
+        if isinstance(node2, (ExternKernelSchedulerNode, NopKernelSchedulerNode)):
+            return False
+        if node1.group != node2.group:
+            return False
+        if self.are_nodes_dependent(node1, node2):
+            return False
+        return True
+
+    def score_fusion(self, node1: BaseSchedulerNode, node2: BaseSchedulerNode):
+        """
+        Assign a score (higher comes first) to the fusion of node1
+        and node2.  When different fusions conflict with each other,
+        this is the way we decide what order to run them in.
+        """
+
+        class FusionTypes:
+            reduction_reduction_horizontal = 10  # reduce loops in reductions
+            other = 0
+
+        # prioritize reads saved
+        common_reads = node1.read_writes.reads & (
+            node2.read_writes.reads | node2.read_writes.writes
+        )
+        memory_score = sum(self.numel_hints[dep.name] for dep in common_reads)
+
+        # prioritize fusions closer together in original order
+        distance_score = -max(
+            abs(node1.min_order - node2.max_order),
+            abs(node2.min_order - node1.max_order),
+        )
+
+        idep = not self.are_nodes_dependent(node1, node2)
+
+        if node1.is_reduction() and node2.is_reduction() and idep:
+            type_score = FusionTypes.reduction_reduction_horizontal
+        else:
+            type_score = FusionTypes.other
+
+        return (type_score, memory_score, distance_score)
+
+    def score_fusion_key(self, nodes):
+        """
+        Shim for list.sort(key=...)
+        """
+        node1, node2 = nodes
+        return self.score_fusion(node1, node2)
+
+    @staticmethod
+    def are_nodes_dependent(node1: BaseSchedulerNode, node2: BaseSchedulerNode):
+        """
+        Check if there are (recursive) dependency edges between node1 and node2.
+        """
+        return bool(
+            (node1.get_names() & node2.recursive_predecessors)
+            or (node2.get_names() & node1.recursive_predecessors)
+        )
 
     def enqueue(self, node):
         if isinstance(node, (tuple, list)):
@@ -1117,17 +1318,6 @@ class Scheduler:
         Mark all pending_buffer_names as available and enqueue any nodes
         that became runnable.
         """
-        if config.debug and (self.fusable_deps or self.pending_buffer_names):
-
-            def gc(d):
-                return {k: v for k, v in d.items() if any(v)}
-
-            names = gc(self.blocked_nodes.dep_to_nodes)
-            deps = gc(self.blocked_nodes.name_to_nodes)
-            if names or deps:
-                log.info(f"blocked names: {names} deps: {deps}")
-                log.info(f"new fusable_deps: {self.fusable_deps}")
-
         while self.pending_buffer_names:
             self.available_buffer_names.update(self.pending_buffer_names)
             nodes_to_add = []

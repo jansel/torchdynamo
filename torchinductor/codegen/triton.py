@@ -955,33 +955,6 @@ class TritonScheduling:
     def group_fn(self, sizes):
         return tuple(V.graph.sizevars.simplify(sympy_product(s)) for s in sizes)
 
-    # TODO(panyj): remove this
-    def group_fn_NHW_C(self, sizes):
-        # group to size of NHW, C for 4d tensor
-        group = ()
-        for s in sizes:
-            if len(s) == 4:
-                group += (
-                    V.graph.sizevars.simplify(sympy_product([s[0], s[2], s[3]])),
-                    s[1],
-                )
-            else:
-                group += (V.graph.sizevars.simplify(sympy_product(s)),)
-        return group
-
-    # TODO(panyj): remove this
-    def group_fn_M_N(self, sizes):
-        group = ()
-        for s in sizes:
-            if len(s) == 2:
-                group += (s[0], s[1])
-            # batch == 1
-            elif len(s) == 3 and s[0] == 1:
-                group += (s[1], s[2])
-            else:
-                group += (V.graph.sizevars.simplify(sympy_product(s)),)
-        return group
-
     def create_node_schedule_pointwise(self, numel: sympy.Expr):
         """
         Get a list of SchedulerNode to execute in a single triton kernel.

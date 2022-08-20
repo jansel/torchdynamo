@@ -950,7 +950,6 @@ class BenchmarkRunner:
         model_iter_fn,
         example_inputs,
         optimize_ctx,
-        accuracy_ctx,
         experiment,
         diff=False,
         branch=None,
@@ -976,7 +975,6 @@ class BenchmarkRunner:
                         model_iter_fn,
                         example_inputs,
                         optimize_ctx,
-                        accuracy_ctx,
                         experiment,
                         diff=False,
                         branch=curr_branch,
@@ -990,7 +988,6 @@ class BenchmarkRunner:
                         model_iter_fn,
                         example_inputs,
                         optimize_ctx,
-                        accuracy_ctx,
                         experiment,
                         diff=False,
                         branch="main",
@@ -1072,8 +1069,8 @@ class BenchmarkRunner:
             torch.manual_seed(1337)
             torchdynamo.reset()
             try:
-                accuracy_model_iter_fn = accuracy_ctx(model_iter_fn)
-                new_result = accuracy_model_iter_fn(model, example_inputs)
+                optimized_model_iter_fn = optimize_ctx(model_iter_fn)
+                new_result = optimized_model_iter_fn(model, example_inputs)
             except Exception:
                 logging.exception("unhandled error")
                 print("ERROR")
@@ -1095,10 +1092,7 @@ class BenchmarkRunner:
                     return sys.exit(-1)
             ok, total = Stats.reset_counters()
             results = []
-            if optimize_ctx != accuracy_ctx:
-                torchdynamo.reset()
             # run with torchdynamo few times to populate the cache
-            optimized_model_iter_fn = optimize_ctx(model_iter_fn)
             for _ in range(3):
                 optimized_model_iter_fn(model, example_inputs)
             _, frames_second_pass = Stats.reset_counters()  # should be 0
@@ -1148,9 +1142,6 @@ def parse_args():
     )
     parser.add_argument(
         "--threads", "-t", type=int, help="number of threads to use for eager"
-    )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="enable verbose debug printouts"
     )
     parser.add_argument(
         "--nopython", action="store_true", help="Turn graph breaks into errors"
@@ -1254,6 +1245,14 @@ def parse_args():
     group_prec.add_argument("--float32", action="store_true", help="cast model to fp32")
     group_prec.add_argument(
         "--amp", action="store_true", help="use automatic mixed precision"
+    )
+
+    group_printout = parser.add_mutually_exclusive_group()
+    group_printout.add_argument(
+        "--verbose", "-v", action="store_true", help="enable verbose debug printouts"
+    )
+    group_printout.add_argument(
+        "--quiet", "-q", action="store_true", help="suppress debug printouts"
     )
 
     group = parser.add_mutually_exclusive_group()
@@ -1452,7 +1451,10 @@ def main(runner, original_dir=None):
         torch.set_num_threads(args.threads)
 
     if args.verbose:
-        torchdynamo.config.debug = True
+        torchdynamo.config.log_level = logging.DEBUG
+
+    if args.quiet:
+        torchdynamo.config.log_level = logging.ERROR
 
     torchdynamo.config.raise_on_assertion_error = args.raise_on_assertion_error
     torchdynamo.config.raise_on_backend_error = args.raise_on_backend_error
@@ -1495,7 +1497,6 @@ def main(runner, original_dir=None):
     if args.no_skip:
         runner.skip_models.clear()
 
-    accuracy_ctx = None
     experiment = null_experiment
     global current_name, current_device, current_batch_size, output_filename, optimize_ctx
     optimize_ctx = NullContext()
@@ -1611,9 +1612,9 @@ def main(runner, original_dir=None):
         output_filename = f"accuracy_aot_{backend_str}.csv"
     elif args.accuracy_aot_ts_mincut:
         optimize_ctx = torchdynamo.optimize("aot_nvfuser", nopython=args.nopython)
-        accuracy_ctx = torchdynamo.optimize(
-            "aot_nvfuser_nodecomps", nopython=args.nopython
-        )
+        # accuracy_ctx = torchdynamo.optimize(
+        #     "aot_nvfuser_nodecomps", nopython=args.nopython
+        # )
         experiment = speedup_experiment
         assert args.nvfuser, "TODO - Add another aot string for mem fusion with NNC"
         backend_str = "nvfuser" if args.nvfuser else "nnc"
@@ -1659,9 +1660,6 @@ def main(runner, original_dir=None):
         experiment = coverage_experiment
         output_filename = "coverage.csv"
 
-    if accuracy_ctx is None:
-        accuracy_ctx = optimize_ctx
-
     runner.setup_amp()
 
     if args.output:
@@ -1697,10 +1695,6 @@ def main(runner, original_dir=None):
         else:
             args.profiler_trace_name = args.profiler_trace_name
 
-    if args.batch_size_file:
-        if not args.only:
-            raise RuntimeError("--batch-size-file requires --only")
-
     experiment = functools.partial(experiment, args, model_iter_fn)
 
     if args.only:
@@ -1735,7 +1729,6 @@ def main(runner, original_dir=None):
                 model_iter_fn,
                 example_inputs,
                 optimize_ctx,
-                accuracy_ctx,
                 experiment,
                 diff=args.diff_main,
             )

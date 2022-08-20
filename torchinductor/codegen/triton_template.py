@@ -8,7 +8,6 @@ from jinja2 import StrictUndefined
 from .. import ir
 from ..virtualized import V
 from .common import IndentedBuffer
-from .triton import CantSplit
 from .triton import TritonKernel
 
 template_dict = {ir.Convolution: "triton_conv", ir.MatrixMultiply: "triton_mm"}
@@ -299,10 +298,11 @@ def template_codegen(scheduler, scheduler_node):
         scheduler_node.mark_fusable()
         # scheduler.pop_group will keep iterating all reachable fusable SchedulerNodes
         assert type(kernel.node) in template_dict.keys()
+
+        """
         tile1, tile2, _ = groups
         fusable_group = tile1 * tile2
 
-        """
         # Add pointwise with compatible dimensions
         for node in scheduler.pop_group(
             (fusable_group, sympy.Integer(1)),

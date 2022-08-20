@@ -111,7 +111,7 @@ class ReadWrites:
     reads: Set[Dep]
     writes: Set[Dep]
     index_exprs: Set[IndexExprDep]
-    range_vars: List[sympy.Expr] = None
+    range_vars: Optional[List[sympy.Expr]] = None
     var_ranges: Optional[VarRanges] = None
 
     def rename(self, renames: typing.Dict[str, str]) -> "ReadWrites":

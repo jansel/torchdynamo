@@ -65,7 +65,6 @@ LOGGING_CONFIG = {
 }
 
 
-@functools.lru_cache(None)
 def init_logging():
     if "PYTEST_CURRENT_TEST" not in os.environ:
         logging.config.dictConfig(LOGGING_CONFIG)

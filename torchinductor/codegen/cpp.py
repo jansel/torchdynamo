@@ -619,7 +619,7 @@ class WorkSharing:
             self.num_threads = threads
             self.in_parallel = True
             if threads == multiprocessing.cpu_count():
-                self.code.writeline(f"#pragma omp parallel")
+                self.code.writeline("#pragma omp parallel")
             else:
                 self.code.writeline(f"#pragma omp parallel num_threads({threads})")
             self.stack.enter_context(self.code.indent())

@@ -1176,11 +1176,33 @@ class TritonScheduling:
     def codegen_nodes(self, nodes):
         _, (numel, rnumel) = max(nodes, key=lambda x: int(x.is_reduction())).group
         node_schedule = []
-        must_keep = set()
         current_loop_writes = set()
+        done = set()
+
+        def fits_in_main_body(n):
+            _, (node_numel, node_rnumel) = n.group
+            return (node_numel == numel and node_rnumel == rnumel) or (
+                    node_numel == numel * rnumel and node_rnumel == 1
+            )
+
+        def fits_outside_reduction(n):
+            _, (node_numel, node_rnumel) = n.group
+            return node_numel == numel and node_rnumel == 1 and rnumel != 1
 
         @contextlib.contextmanager
-        def disable_reduction():
+        def end_current_reduction_loop():
+            if current_loop_writes:
+                # flush out any other runnable nodes to reduce number of loops
+                for other_node in nodes[index+1:]:
+                    if (
+                            node not in done and
+                            fits_in_main_body(other_node) and
+                            not (current_loop_writes & other_node.recursive_predecessors)
+                    ):
+                        done.add(node)
+                        current_loop_writes.add(node.get_name())
+                        node_schedule.append(node)
+
             if node_schedule and node_schedule[-1] is EnableReduction:
                 node_schedule.pop()
             else:
@@ -1189,23 +1211,23 @@ class TritonScheduling:
             node_schedule.append(EnableReduction)
             current_loop_writes.clear()
 
-        for node in nodes:
-            _, (node_numel, node_rnumel) = node.group
-            if (node_numel == numel and node_rnumel == rnumel) or (
-                node_numel == numel * rnumel and node_rnumel == 1
-            ):
-                if current_loop_writes & node.recursive_predecessors:
-                    must_keep.update(current_loop_writes & node.recursive_predecessors)
-                    with disable_reduction():
+        for index, node in enumerate(nodes):
+            if node in done:
+                continue
+            done.add(node)
+
+            if fits_in_main_body(node):
+                if current_loop_writes & node.recursive_predecessors and rnumel != 1:
+                    with end_current_reduction_loop():
                         pass  # need to start a new reduction loop
                 current_loop_writes.add(node.get_name())
                 node_schedule.append(node)
-            elif node_numel == numel and node_rnumel == 1:
-                with disable_reduction():
+            elif fits_outside_reduction(node):
+                with end_current_reduction_loop():
                     node_schedule.append(node)
             else:
                 raise NotImplementedError(
-                    f"unexpected group: ({numel}, {rnumel}) != ({node_numel}, {node_rnumel})"
+                    f"unexpected group: ({numel}, {rnumel}) != {node.group[1]}"
                 )
 
         for node in node_schedule:
@@ -1214,7 +1236,6 @@ class TritonScheduling:
                 node.mark_fusable()
 
         log.info("schedule: %s", node_schedule)
-
         return self.codegen_node_schedule(node_schedule, numel, rnumel)
 
     def codegen_node_schedule(self, node_schedule, numel, reduction_numel):

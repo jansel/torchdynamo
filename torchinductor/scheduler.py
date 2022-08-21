@@ -1216,27 +1216,40 @@ class Scheduler:
             return False
         if node2.get_names() & node1.recursive_predecessors:
             return False
-        if not config.aggressive_fusion and self.score_fusion_memory(node1, node2) == 0:
-            return False
 
         device = node1.get_device()
         if device != node2.get_device():
             return False
 
-        node1_names = node1.get_names()
-        if node1_names & node2.recursive_predecessors:
+        no_shared_data = self.score_fusion_memory(node1, node2) == 0
+        if (node1.is_reduction() or node2.is_reduction() or not config.aggressive_fusion) and no_shared_data:
+            return False
+
+        if node1.get_names() & node2.recursive_predecessors:
             # node2 depends on node1 outputs
-            remaining_deps = {
-                dep.name for dep in node2.unmet_dependencies - node1.read_writes.writes
-            }
-            if remaining_deps & node1_names:
-                return False  # MemoryDeps didn't match
-            for name in remaining_deps:
-                if node1_names & self.name_to_fused_node[name].recursive_predecessors:
-                    return False
-            return self.get_backend(device).can_fuse_vertical(node1, node2)
+            return self.can_fuse_vertical(node1, node2) and self.get_backend(device).can_fuse_vertical(node1, node2)
         else:
+            # nodes don't depend on each other, but may have common reads
             return self.get_backend(device).can_fuse_horizontal(node1, node2)
+
+    def can_fuse_vertical(self, node1, node2):
+        """
+        Check if it is legal to fuse a consumer (node2) into a producer (node1).
+
+        We can fuse them if all the reads of node2 either match
+        corresponding writes in node1, or are written by nodes that can
+        be scheduled before the fusion of node1 and node2.
+        """
+        node1_names = node1.get_names()
+        remaining_deps = {
+            dep.name for dep in node2.unmet_dependencies - node1.read_writes.writes
+        }
+        if remaining_deps & node1_names:
+            return False  # MemoryDeps didn't match
+        for name in remaining_deps:
+            if node1_names & self.name_to_fused_node[name].recursive_predecessors:
+                return False
+        return True
 
     def score_fusion(self, node1: BaseSchedulerNode, node2: BaseSchedulerNode):
         """
@@ -1245,54 +1258,28 @@ class Scheduler:
         this is the way we decide what order to run them in.
 
         Our current score is based on:
-        - The type of fusion
         - Estimate of the saved memory operations
         - Fusions closer together in original order
         """
-        type_score = self.score_fusion_type(node1, node2)
         memory_score = self.score_fusion_memory(node1, node1)
-        proximity_score = self.score_fusion_proximity(node1, node2)
-        if memory_score <= 0:
-            type_score -= 100
+        proximity_score = -max(
+            abs(node1.min_order - node2.max_order),
+            abs(node2.min_order - node1.max_order),
+        )
         return (
-            type_score,
+            not node1.is_reduction() and not node2.is_reduction() and memory_score > 0,
             memory_score,
             proximity_score,
         )
 
-    def score_fusion_type(self, node1, node2):
-        """
-        The first term in our fusion score that is based on the type of fusion.
-        """
-        if node1.is_template():
-            return 30  # template + epilogue
-        if (
-            node1.is_reduction()
-            and node2.is_reduction()
-            and not self.are_nodes_dependent(node1, node2)
-        ):
-            return 20  # reduce reduction loop count
-        if not node1.is_reduction() and not node2.is_reduction():
-            return 10  # pointwise has more flexible tiling
-        return 0
-
     def score_fusion_memory(self, node1, node2):
         """
-        The second term in our fusion score that estimates number of saved memory operations.
+        The first term in our fusion score that estimates number of saved memory operations.
         """
         common_reads = node1.read_writes.reads & (
             node2.read_writes.reads | node2.read_writes.writes
         )
         return sum(dep.numel_hint() for dep in common_reads)
-
-    def score_fusion_proximity(self, node1, node2):
-        """
-        The third term in our fusion score that prioritize fusions closer together in original order.
-        """
-        return -max(
-            abs(node1.min_order - node2.max_order),
-            abs(node2.min_order - node1.max_order),
-        )
 
     def score_fusion_key(self, nodes):
         """
@@ -1300,16 +1287,6 @@ class Scheduler:
         """
         node1, node2 = nodes
         return self.score_fusion(node1, node2)
-
-    @staticmethod
-    def are_nodes_dependent(node1: BaseSchedulerNode, node2: BaseSchedulerNode):
-        """
-        Check if there are (recursive) dependency edges between node1 and node2.
-        """
-        return bool(
-            (node1.get_names() & node2.recursive_predecessors)
-            or (node2.get_names() & node1.recursive_predecessors)
-        )
 
     def enqueue(self, node):
         if isinstance(node, (tuple, list)):

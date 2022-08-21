@@ -1243,30 +1243,38 @@ class Scheduler:
         Assign a score (higher comes first) to the fusion of node1
         and node2.  When different fusions conflict with each other,
         this is the way we decide what order to run them in.
+
+        Our current score is based on:
+        - The type of fusion
+        - Estimate of the saved memory operations
+        - Fusions closer together in original order
         """
+        type_score = self.score_fusion_type(node1, node2)
+        memory_score = self.score_fusion_memory(node1, node1)
+        proximity_score = self.score_fusion_proximity(node1, node2)
+        if memory_score <= 0:
+            type_score -= 100
         return (
-            self.score_fusion_type(node1, node2),
-            self.score_fusion_memory(node1, node1),
-            self.score_fusion_proximity(node1, node2),
+            type_score,
+            memory_score,
+            proximity_score,
         )
 
     def score_fusion_type(self, node1, node2):
         """
         The first term in our fusion score that is based on the type of fusion.
         """
-
-        class FusionTypes:
-            reduction_reduction_horizontal = 10  # reduce loops in reductions
-            other = 0
-
-        idep = not self.are_nodes_dependent(node1, node2)
-
-        if node1.is_reduction() and node2.is_reduction() and idep:
-            type_score = FusionTypes.reduction_reduction_horizontal
-        else:
-            type_score = FusionTypes.other
-
-        return type_score
+        if node1.is_template():
+            return 30  # template + epilogue
+        if (
+            node1.is_reduction()
+            and node2.is_reduction()
+            and not self.are_nodes_dependent(node1, node2)
+        ):
+            return 20  # reduce reduction loop count
+        if not node1.is_reduction() and not node2.is_reduction():
+            return 10  # pointwise has more flexible tiling
+        return 0
 
     def score_fusion_memory(self, node1, node2):
         """

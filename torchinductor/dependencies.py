@@ -52,9 +52,8 @@ class MemoryDep(typing.NamedTuple):
 
     def strip_last_size(self) -> "MemoryDep":
         nsizes = len(self.size)
-        assert (
-            nsizes >= 1 and len(self.index.args) <= nsizes - 1
-        ), "Only used on reductions"
+        if not (nsizes >= 1 and len(self.index.args) <= nsizes - 1):
+            return self
         # make sure last dim index is not used
         prefix = canonicalization_prefix()
         len_prefix = len(prefix)

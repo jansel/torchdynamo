@@ -977,7 +977,9 @@ class TritonScheduling:
             # check for a bad combined tiling
             tiling1 = self.select_tiling(node1.get_nodes(), numel1, rnumel1)
             tiling2 = self.select_tiling(node2.get_nodes(), numel1, rnumel1)
-            tiling3 = self.select_tiling(node1.get_nodes() + node2.get_nodes(), numel1, rnumel1)
+            tiling3 = self.select_tiling(
+                node1.get_nodes() + node2.get_nodes(), numel1, rnumel1
+            )
             if len(tiling1) > 2:
                 if len(tiling2) > 2:
                     return tiling1 == tiling2 == tiling3
@@ -991,11 +993,14 @@ class TritonScheduling:
         if not node1.is_reduction() and node2.is_reduction():
             assert rnumel1 == 1 and rnumel2 != 1
             if numel1 == numel2 * rnumel2:
-                return TritonKernel.is_compatible(
-                        (numel2, rnumel2), node1.get_ranges()
-                ) and self.select_tiling(node1.get_nodes(), numel1) in (
-                        (numel1, 1),
-                        (numel2, rnumel2, 1),
+                if not all(
+                    TritonKernel.is_compatible((numel2, rnumel2), n.get_ranges())
+                    for n in node1.get_nodes()
+                ):
+                    return False
+                return self.select_tiling(node1.get_nodes(), numel1) in (
+                    (numel1, 1),
+                    (numel2, rnumel2, 1),
                 )
 
             return numel1 == numel2
@@ -1352,8 +1357,6 @@ class TritonScheduling:
                 if isinstance(node, torchinductor.scheduler.SchedulerNode)
             ):
                 return new_groups
-            else:
-                log.warning("incompatible tiling %s -- %s", new_groups, ranked_tilings)
 
         return (numel, reduction_numel)
 

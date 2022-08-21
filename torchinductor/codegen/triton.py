@@ -1083,7 +1083,6 @@ class TritonScheduling:
         for node in node_schedule:
             if node not in (EnableReduction, DisableReduction):
                 node.mark_run()
-                node.mark_fusable()
 
         log.info("schedule: %s", node_schedule)
         return self.codegen_node_schedule(node_schedule, numel, rnumel)
@@ -1091,7 +1090,7 @@ class TritonScheduling:
     def codegen_node_schedule(self, node_schedule, numel, reduction_numel):
         tiled_groups = self.select_tiling(node_schedule, numel, reduction_numel)
 
-        with self.scheduler.kernel(TritonKernel(*tiled_groups)) as kernel:
+        with TritonKernel(*tiled_groups) as kernel:
             stack = contextlib.ExitStack()
             for node in node_schedule:
                 if node is DisableReduction:
@@ -1115,7 +1114,6 @@ class TritonScheduling:
                 code = src_code.format(kernel_name=kernel_name)
                 wrapper.header.splice(code)
         kernel.call_kernel(wrapper, kernel_name)
-        self.scheduler.barrier()
         self.scheduler.free_buffers()
 
     @staticmethod

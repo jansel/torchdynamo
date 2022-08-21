@@ -287,15 +287,13 @@ def template_codegen(scheduler, scheduler_node):
     fuse = False
     could_remove_kernel_buf = False
     fusable_nodes = []
-    with scheduler.kernel(TritonTemplateKernel(scheduler_node.node, *groups)) as kernel:
+    with TritonTemplateKernel(scheduler_node.node, *groups) as kernel:
         # map const args/ shape/ strides to kernel args
         kernel.map_args()
         # set self.args name to match the TritonTemplateKernel's args names
         kernel.rename_vars()
         # update node dep from StarDep to MemoryDep
         scheduler_node.update_dep_type()
-        # mark node of TritonTemplateKernel as fusable and update fusable_deps
-        scheduler_node.mark_fusable()
         # scheduler.pop_group will keep iterating all reachable fusable SchedulerNodes
         assert type(kernel.node) in template_dict.keys()
 
@@ -366,6 +364,4 @@ def template_codegen(scheduler, scheduler_node):
         # code gen call to kernel
         kernel.call_kernel(wrapper, kernel_name)
 
-        scheduler.enqueue(reschedule)  # TODO: consider reschedule
-        scheduler.barrier()  # enqueue any nodes that became runnable after this node is run
-        scheduler.maybe_free_buffers()
+        assert not reschedule

@@ -59,8 +59,8 @@ repro_level = int(os.environ.get("INDUCTOR_REPRO_LEVEL", 0))
 # fuse even in cases where it doesn't reduce memory usage
 aggressive_fusion = True
 
-# how many iterations of fusions to do
-fusion_passes = 2
+# maximum iterations of fusions to do
+fusion_passes = 3
 
 
 # config specific to codegen/cpp.pp

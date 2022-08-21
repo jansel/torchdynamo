@@ -516,7 +516,7 @@ class CppScheduling:
         ).group
         in_suffix = False
 
-        with scheduler.kernel(kernel_group.new_kernel()) as kernel:
+        with kernel_group.new_kernel() as kernel:
             vars, reduction_vars = kernel.set_ranges(group, reduction_group)
 
             for node in nodes:
@@ -526,7 +526,6 @@ class CppScheduling:
                 ]:
                     assert not in_suffix
                     node.run(vars, reduction_vars)
-                    node.mark_fusable()
                 else:
                     in_suffix = True
                     assert node.group[1] == (
@@ -536,7 +535,6 @@ class CppScheduling:
                     # we can fuse in some extra pointwise into the suffix
                     with kernel.write_to_suffix():
                         node.run(vars, ())
-                        node.mark_fusable()
 
         kernel_group.finalize_kernel(kernel, scheduler)
 
@@ -563,8 +561,6 @@ class KernelGroup:
         code = self.loops_code
         ws = self.ws
         new_kernel.codegen_loops(code, ws)
-        # TODO(jansel): we shouldn't always need a barrier here
-        scheduler.barrier()
 
     def codegen_define_and_call(self, wrapper):
         self.stack.close()

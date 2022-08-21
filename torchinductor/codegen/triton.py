@@ -1116,7 +1116,7 @@ class TritonScheduling:
                 wrapper.header.splice(code)
         kernel.call_kernel(wrapper, kernel_name)
         self.scheduler.barrier()
-        self.scheduler.maybe_free_buffers()
+        self.scheduler.free_buffers()
 
     @staticmethod
     @functools.lru_cache(32)

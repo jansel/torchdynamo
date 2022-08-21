@@ -68,6 +68,7 @@ class BaseSchedulerNode:
         self.set_read_writes(node.get_read_writes())
         self.min_order = None
         self.max_order = None
+        self.last_usage = None
 
     def __repr__(self):
         return f"{type(self).__name__}(name={self.get_name()!r})"
@@ -118,6 +119,12 @@ class BaseSchedulerNode:
         self.read_writes: dependencies.ReadWrites = rw
         self.unmet_dependencies = self.read_writes.reads
         self.prune_deps()
+
+    def used_buffer_names(self) -> Set[str]:
+        return {
+            dep.name
+            for dep in itertools.chain(self.read_writes.reads, self.read_writes.writes)
+        }
 
     def prune_deps(self):
         self.unmet_dependencies = {
@@ -418,15 +425,6 @@ class SchedulerNode(BaseSchedulerNode):
         else:
             return len(self.group) - 1
 
-    def possible_reduction_groups(self):
-        """
-        Get any reduction groups of consumers of this node
-        """
-        for use in self.users:
-            if use.node.is_reduction():
-                _, (other_numel, other_rnumel) = use.node.group
-                yield (other_numel, other_rnumel)
-
 
 class FusedSchedulerNode(BaseSchedulerNode):
     """
@@ -479,6 +477,9 @@ class FusedSchedulerNode(BaseSchedulerNode):
 
     def get_names(self) -> Set[str]:
         return functools.reduce(set.union, [x.get_names() for x in self.snodes])
+
+    def used_buffer_names(self) -> Set[str]:
+        return functools.reduce(set.union, [x.used_buffer_names() for x in self.snodes])
 
     def get_nodes(self) -> List[BaseSchedulerNode]:
         return self.snodes
@@ -606,14 +607,6 @@ class NodeUser:
         return self.node.get_name()
 
 
-def get_fake_func(name):
-    def func1(*args):
-        return 0
-
-    func1.__name__ = name
-    return func1
-
-
 def draw_buffers(nodes, fname, print_graph=False):
     """
     Draw a graph in fname.svg.
@@ -646,53 +639,24 @@ def draw_buffers(nodes, fname, print_graph=False):
         print(graph)
     print("starting creating module")
     gm = GraphModule({}, graph)
-    graph = legalize_graph(gm)
+    legalize_graph(gm)
     gm.graph.lint()
     print("starting drawing")
     draw_graph(gm, fname, clear_meta=False)
-
-
-class DisjointSetUnion:
-    """
-    Maintains a disjoint set union data structure, with union-by-size (log(n) queries).
-
-    See https://cp-algorithms.com/data_structures/disjoint_set_union.html for a reference
-    """
-
-    def __init__(self, n):
-        self.parent = list(range(n))
-        self.size = [1] * n
-        self.num_sets = n
-
-    def find(self, a):
-        acopy = a
-        while a != self.parent[a]:
-            a = self.parent[a]
-        while acopy != a:
-            self.parent[acopy], acopy = a, self.parent[acopy]
-        return a
-
-    def union(self, a, b):
-        a, b = self.find(a), self.find(b)
-        if a != b:
-            if self.size[a] < self.size[b]:
-                a, b = b, a
-
-            self.num_sets -= 1
-            self.parent[b] = a
-            self.size[a] += self.size[b]
-
-    def set_size(self, a):
-        return self.size[self.find(a)]
-
-    def __len__(self):
-        return self.num_sets
 
 
 def create_fx_from_snodes(snodes: List[BaseSchedulerNode]) -> fx.Graph:
     """
     Creates a FX Graph from a list of SchedulerNode objects.
     """
+
+    def get_fake_func(name):
+        def func1(*args):
+            return 0
+
+        func1.__name__ = name
+        return func1
+
     FusionMeta = collections.namedtuple("FusionMeta", ["group", "snodes", "type"])
 
     func_dict = {s: get_fake_func(s) for s in ["extern", "nop", "compute", "fused"]}
@@ -782,6 +746,7 @@ class Scheduler:
             *V.graph.graph_inputs.keys(),
             *V.graph.constants.keys(),
         }
+        self.buffer_names_to_free = set()
         self.pending_buffer_names = set()
         self.check_can_free = set()
         self.fusable_deps = set()
@@ -818,23 +783,17 @@ class Scheduler:
         self.compute_predecessors()
         self.dead_node_elimination()
 
-        if log.isEnabledFor(logging.INFO):
-            log.info("PRE FUSION:")
-            self.print_nodes()
-
+        self.debug_print_nodes("PRE FUSION")
         self.num_orig_nodes = len(self.nodes)
         self.name_to_fused_node = {n.get_name(): n for n in self.nodes}
         self.fuse_nodes()
-
-        if log.isEnabledFor(logging.INFO):
-            log.info("POST FUSION:")
-            self.print_nodes()
+        self.compute_last_usage()
+        self.debug_print_nodes("POST FUSION")
+        self.debug_draw_graph()
 
         self.enqueue(self.nodes)
 
-        self.draw_graph()
-
-    def draw_graph(self):
+    def debug_draw_graph(self):
         """Generate an image of the graph for debugging"""
         if os.environ.get("INDUCTOR_WRITE_SCHEDULER_GRAPH", None) == "1":
             try:
@@ -850,10 +809,11 @@ class Scheduler:
 
             draw_buffers(self.nodes, graph_name, print_graph=True)
 
-    def print_nodes(self):
-        log.info("Nodes:")
-        for node in self.nodes:
-            node.log_details()
+    def debug_print_nodes(self, label):
+        if log.isEnabledFor(logging.INFO):
+            log.info("%s:", label)
+            for node in self.nodes:
+                node.log_details()
 
     def compute_dependencies(self):
         """
@@ -1157,6 +1117,16 @@ class Scheduler:
         node1, node2 = nodes
         return self.score_fusion(node1, node2)
 
+    def compute_last_usage(self):
+        """
+        Populate node.last_usage
+        """
+        future_used_buffers = set()
+        for node in reversed(self.nodes):
+            used_buffers = node.used_buffer_names()
+            node.last_usage = used_buffers - future_used_buffers
+            future_used_buffers.update(used_buffers)
+
     def enqueue(self, node):
         if isinstance(node, (tuple, list)):
             for n in node:
@@ -1228,7 +1198,7 @@ class Scheduler:
 
     def maybe_free_buffers(self):
         # perhaps there are some unused buffers we can free
-        for done_name in self.check_can_free:
+        for done_name in sorted(self.check_can_free - V.graph.removed_buffers):
             done_node = self.name_to_node[done_name]
             for node in done_node.inverse_users:
                 name = node.get_name()
@@ -1245,6 +1215,19 @@ class Scheduler:
                         V.graph.wrapper_code.codegen_free(node.node)
         self.check_can_free.clear()
 
+    def free_buffers(self):
+        for name in sorted(self.buffer_names_to_free - V.graph.removed_buffers):
+            if name in self.name_to_node:
+                node = self.name_to_node[name]
+                # TODO(jansel): can we remove these mutation guards?  Mutation will cause leaks
+                if (
+                    node.can_free()
+                    and name not in self.mutation_real_name
+                    and name not in self.mutation_renames
+                ):
+                    V.graph.wrapper_code.codegen_free(node.node)
+        self.buffer_names_to_free.clear()
+
     def kernel(self, kernel):
         self.fusable_deps.clear()
         self.kernels.append(kernel)
@@ -1259,6 +1242,7 @@ class Scheduler:
     def flush(self):
         for backend in self.backends.values():
             backend.flush()
+        self.free_buffers()
 
     def codegen_extern_call(self, scheduler_node: ExternKernelSchedulerNode):
         assert isinstance(scheduler_node, ExternKernelSchedulerNode)
@@ -1294,6 +1278,7 @@ class Scheduler:
         for node in self.nodes:
             if isinstance(node, NopKernelSchedulerNode):
                 node.run()
+                self.buffer_names_to_free.update(node.last_usage)
                 continue
 
             device = node.get_device()
@@ -1303,9 +1288,12 @@ class Scheduler:
 
             if isinstance(node, ExternKernelSchedulerNode):
                 node.run(self.codegen_extern_call)
+                self.free_buffers()
             else:
                 assert isinstance(node, (FusedSchedulerNode, SchedulerNode))
                 log.info("RUNNING %s: %s", node, node.get_nodes())
                 self.get_backend(device).codegen_nodes(node.get_nodes())
+
+            self.buffer_names_to_free.update(node.last_usage)
 
         self.flush()

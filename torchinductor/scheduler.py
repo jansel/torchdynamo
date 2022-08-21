@@ -24,17 +24,12 @@ from .codegen.triton_template import template_codegen
 from .dependencies import MemoryDep
 from .dependencies import StarDep
 from .sizevars import SimplifyIndexing
+from .utils import cmp
+from .utils import precompute_methods
 from .virtualized import V
 
-template_kernels = [ir.Convolution, ir.MatrixMultiply]
-
 log = logging.getLogger(__name__)
-
-INDUCTOR_SCHEDULER_GRAPH = bool(os.environ.get("INDUCTOR_SCHEDULER_GRAPH", None) == "1")
-
-
-def cmp(a, b):
-    return int(a > b) - int(a < b)
+template_kernels = [ir.Convolution, ir.MatrixMultiply]
 
 
 def should_use_template(node: ir.ExternKernel):
@@ -44,16 +39,6 @@ def should_use_template(node: ir.ExternKernel):
         elif isinstance(node, ir.MatrixMultiply):
             return node.kernel != "aten.mm.out"
     return False
-
-
-def precompute_method(obj, method):
-    result = getattr(obj, method)()
-    setattr(obj, method, lambda: result)
-
-
-def precompute_methods(obj, methods):
-    for method in methods:
-        precompute_method(obj, method)
 
 
 class OutputNode:
@@ -100,10 +85,9 @@ class BaseSchedulerNode:
 
     def log_details(self):
         log.info(
-            "%s:\n  unmet_dependencies = %s\n  recursive_predecessors = %s",
+            "%s: unmet_dependencies = %s",
             self,
             self.unmet_dependencies,
-            self.recursive_predecessors,
         )
 
     def update_mutated_names(self, renames: Dict[str, str]):
@@ -779,125 +763,6 @@ def create_fx_from_snodes(snodes: List[BaseSchedulerNode]) -> fx.Graph:
     return graph
 
 
-# TODO: Make this support pre-fusing reductions
-def prefuse_nodes(snodes: List[BaseSchedulerNode]):
-    """
-    Groups together fusible scheduler nodes into a FusedSchedulerNode
-    Note: O(N^2) asymptotics
-    """
-    if len(snodes) == 0:
-        return snodes
-    from torch.fx.passes.tools_common import legalize_graph
-
-    def toposort(graph):
-        gm = fx.GraphModule({}, graph)
-        legalize_graph(gm)
-        return gm.graph
-
-    graph = create_fx_from_snodes(snodes)
-    graph = toposort(graph)
-
-    for idx, node in enumerate(graph.nodes):
-        node.order = idx
-
-    fusible_nodes = [
-        node
-        for node in graph.nodes
-        if node.op == "call_function" and node.meta["fusion_meta"].type == "compute"
-    ]
-
-    def will_create_cycle(src, dst):
-        # Finds whether there's a path from src to dst that isn't a direct edge
-        cur_nodes = collections.deque(
-            [user for user in src.users if user != dst]
-            + [user for user in dst.users if user != src]
-        )
-        vis = set()
-        while len(cur_nodes) > 0:
-            cur = cur_nodes.popleft()
-            if cur in vis:
-                continue
-            if cur == dst or cur == src:
-                return True
-            vis.add(cur)
-            for user in cur.users:
-                cur_nodes.append(user)
-        return False
-
-    def fuse_nodes(a: fx.Node, b: fx.Node):
-        a.args = tuple((set(a.args) | set(b.args)) - set([a, b]))
-        b.replace_all_uses_with(a)
-        a.meta["fusion_meta"].snodes.extend(b.meta["fusion_meta"].snodes)
-        a.meta["fusion_meta"]._replace(type="fused")
-        a.name = a.name + "_" + b.name
-        graph.erase_node(b)
-        return a
-
-    def is_fusible(groupA, groupB):
-        return groupA == groupB
-
-    def fusion_weight(nodeA, nodeB):
-        shared_reads = len(set(nodeA.args) & set(nodeB.args))
-        saved_write = 0
-        saved_read = 0
-
-        if nodeA in nodeB.users:
-            nodeA, nodeB = nodeB, nodeA
-
-        if nodeB in nodeA.users:
-            saved_read += 1
-            if nodeA.users == 1:
-                saved_write += 1
-
-        return shared_reads + saved_write + saved_read
-
-    # Enumerates all fusion opportunities, and ranks them in descending order of shared reads
-    fusion_opportunities = []
-    for idx, nodeA in enumerate(fusible_nodes):
-        for nodeB in fusible_nodes[idx + 1 :]:
-            if (
-                is_fusible(
-                    nodeA.meta["fusion_meta"].group, nodeB.meta["fusion_meta"].group
-                )
-                and fusion_weight(nodeA, nodeB) > 0
-            ):
-                fusion_opportunities.append([fusion_weight(nodeA, nodeB), nodeA, nodeB])
-
-    # NB: Python sort is stable, so this is deterministic
-    fusion_opportunities = sorted(
-        fusion_opportunities, key=lambda x: x[0], reverse=True
-    )
-    mapping = DisjointSetUnion(len(graph.nodes))
-    nodes = list(graph.nodes)
-
-    # We greedily fuse nodes in the order of the fusion opportunities, using a
-    # DSU to track which nodes are fused.
-    for _, a, b in fusion_opportunities:
-        a = nodes[mapping.find(a.order)]
-        b = nodes[mapping.find(b.order)]
-        if a == b:
-            continue
-        if not will_create_cycle(a, b):
-            fused_node = fuse_nodes(a, b)
-            nodes[mapping.find(a.order)] = fused_node
-            nodes[mapping.find(b.order)] = fused_node
-            mapping.union(a.order, b.order)
-
-    graph = toposort(graph)
-    graph.lint()
-
-    scheduler = snodes[0].scheduler
-    new_snodes = []
-    for node in graph.nodes:
-        if "fusion_meta" in node.meta:
-            snode = node.meta["fusion_meta"].snodes
-            if len(snode) == 1:
-                new_snodes.append(snode[0])
-            else:
-                new_snodes.append(FusedSchedulerNode(scheduler, snode))
-    return new_snodes
-
-
 class Scheduler:
     def __init__(self, nodes):
         super(Scheduler, self).__init__()
@@ -920,7 +785,7 @@ class Scheduler:
         self.pending_buffer_names = set()
         self.check_can_free = set()
         self.fusable_deps = set()
-        self.name_to_fused_node = None
+        self.name_to_fused_node = None  # set in fuse_nods()
         for node in nodes:
             assert (
                 node.origins is not None
@@ -971,7 +836,7 @@ class Scheduler:
 
     def draw_graph(self):
         """Generate an image of the graph for debugging"""
-        if INDUCTOR_SCHEDULER_GRAPH:
+        if os.environ.get("INDUCTOR_WRITE_SCHEDULER_GRAPH", None) == "1":
             try:
                 from functorch.compile import get_graph_being_compiled
 
@@ -1222,12 +1087,16 @@ class Scheduler:
             return False
 
         no_shared_data = self.score_fusion_memory(node1, node2) == 0
-        if (node1.is_reduction() or node2.is_reduction() or not config.aggressive_fusion) and no_shared_data:
-            return False
+        if no_shared_data and (
+            not config.aggressive_fusion or node1.is_reduction() or node2.is_reduction()
+        ):
+            return False  # heuristic not needed for correctness
 
         if node1.get_names() & node2.recursive_predecessors:
             # node2 depends on node1 outputs
-            return self.can_fuse_vertical(node1, node2) and self.get_backend(device).can_fuse_vertical(node1, node2)
+            return self.can_fuse_vertical(node1, node2) and self.get_backend(
+                device
+            ).can_fuse_vertical(node1, node2)
         else:
             # nodes don't depend on each other, but may have common reads
             return self.get_backend(device).can_fuse_horizontal(node1, node2)
@@ -1387,67 +1256,6 @@ class Scheduler:
 
         return ctx()
 
-    def iter_runnable_groups(self):
-        while self.runnable_groups or self.runnable_extern_kernels:
-            if self.runnable_extern_kernels:
-                runnable_extern_kernel = self.runnable_extern_kernels.popleft()
-                try:
-                    self.current_device = runnable_extern_kernel.get_device()
-                except AttributeError:
-                    # 'MultiOutputLayout' object has no attribute 'device'
-                    pass
-                runnable_extern_kernel.run(self.codegen_extern_call)
-            else:
-                group, priority = self.runnable_groups.most_common(1)[0]
-                del self.runnable_groups[group]
-                yield group
-        assert not self.runnable_nodes
-        assert self.num_orig_nodes == self.run_count
-
-    def iter_fixed_point(self):
-        """
-        Keep yielding until self.run_count converges
-        """
-        prior_run_count = -1
-        while prior_run_count != self.run_count:
-            prior_run_count = self.run_count
-            yield
-
-    def unordered_pop_group(self, group_without_device):
-        group = (self.current_device, tuple(group_without_device))
-        while group in self.runnable_nodes:
-            if group in self.runnable_groups:
-                del self.runnable_groups[group]
-            yield from self.runnable_nodes.pop(group)
-        if self.fusable_deps:
-            fusable = True
-            while fusable:
-                # keep poping fusable nodes as their depdencies are satisfied
-                fusable = self.blocked_nodes.pop_fusable(self.fusable_deps, group)
-                yield from fusable
-
-    def pop_group(self, group_without_device):
-        """Imposes a sorted order on unordered_pop_group"""
-        nodes = [True]
-        while nodes:
-            nodes = list(self.unordered_pop_group(group_without_device))
-            nodes.sort(key=lambda x: x.get_sort_order())
-            yield from nodes
-
-    def has_group(self, group_without_device):
-        nodes = list(self.unordered_pop_group(group_without_device))
-        self.enqueue(nodes)
-        return bool(nodes)
-
-    def pop_groups(self, groups):
-        keep_going = True
-        while keep_going:
-            keep_going = False
-            for group in groups:
-                for node in self.pop_group(group):
-                    keep_going = True
-                    yield node
-
     def flush(self):
         for backend in self.backends.values():
             backend.flush()
@@ -1464,6 +1272,9 @@ class Scheduler:
             self.maybe_free_buffers()
 
     def create_backend(self, device: torch.device):
+        assert (
+            device.type != "cuda" or device.index is not None
+        ), f"{device} should have been normalized in lowering"
         V.graph.device_types.add(device.type)
         if device.type == "cpu":
             from .codegen.cpp import CppScheduling

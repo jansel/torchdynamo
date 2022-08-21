@@ -961,11 +961,14 @@ class TritonScheduling:
     def group_fn(self, sizes):
         return tuple(V.graph.sizevars.simplify(sympy_product(s)) for s in sizes)
 
-    def can_fuse_horizontal(self, node1, node2):
+    def can_fuse(self, node1, node2):
+        """
+        Hook called by Scheduler to determine if the Triton backend
+        can fuse node1 and node2.  These nodes might already be
+        FusedSchedulerNodes.
+        """
         _, (numel1, rnumel1) = node1.group
         _, (numel2, rnumel2) = node2.group
-
-        log.info("can_fuse %s %s", node1, node2)
 
         if node1.is_reduction() and node2.is_reduction():
             return numel1 == numel2 and rnumel1 == rnumel2
@@ -980,13 +983,14 @@ class TritonScheduling:
             tiling3 = self.select_tiling(
                 node1.get_nodes() + node2.get_nodes(), numel1, rnumel1
             )
-            if len(tiling1) > 2:
-                if len(tiling2) > 2:
-                    return tiling1 == tiling2 == tiling3
-                else:
-                    return tiling1 == tiling3
-            elif len(tiling2) > 2:
-                return tiling2 == tiling3
+            if config.triton.tiling_prevents_pointwise_fusion:
+                if len(tiling1) > 2:
+                    if len(tiling2) > 2:
+                        return tiling1 == tiling2 == tiling3
+                    else:
+                        return tiling1 == tiling3
+                elif len(tiling2) > 2:
+                    return tiling2 == tiling3
 
             return True
 
@@ -998,182 +1002,26 @@ class TritonScheduling:
                     for n in node1.get_nodes()
                 ):
                     return False
-                return self.select_tiling(node1.get_nodes(), numel1) in (
-                    (numel1, 1),
-                    (numel2, rnumel2, 1),
-                )
+                if config.triton.tiling_prevents_reduction_fusion:
+                    return self.select_tiling(node1.get_nodes(), numel1) in (
+                        (numel1, 1),
+                        (numel2, rnumel2, 1),
+                    )
+                return True
 
             return numel1 == numel2
 
         assert node1.is_reduction() and not node2.is_reduction()
-        return self.can_fuse_horizontal(node2, node1)  # swap args
+        # swap args to hit the case above
+        return self.can_fuse_horizontal(node2, node1)
 
-    def can_fuse_vertical(self, node1, node2):
-        return self.can_fuse_horizontal(node1, node2)
-
-    def create_node_schedule_pointwise(self, numel: sympy.Expr):
-        """
-        Get a list of SchedulerNode to execute in a single triton kernel.
-
-        `numel` is the number of elements in the input/output
-        """
-        node_schedule = []
-        nodes_to_reschedule = []
-
-        def want_node():
-            """
-            Check if adding node to the schedule would make tiling worse.
-            """
-            if node_schedule:
-                current_tiling = self.select_tiling(node_schedule, numel)
-                if len(current_tiling) > 2:
-                    new_tiling = self.select_tiling([node], numel)
-                    if len(new_tiling) > 2 and new_tiling != current_tiling:
-                        return False
-                    combined_tiling = self.select_tiling(node_schedule + [node], numel)
-                    if combined_tiling != current_tiling:
-                        return False
-            return True
-
-        for node in self.scheduler.pop_group(
-            (numel, sympy.Integer(1)),
-        ):
-            if want_node():
-                node.mark_run()
-                node_schedule.append(node)
-                node.mark_fusable()
-            else:
-                nodes_to_reschedule.append(node)
-
-        self.scheduler.enqueue(nodes_to_reschedule)
-        return node_schedule
-
-    def create_node_schedule_reduction(
-        self, numel: sympy.Expr, reduction_numel: sympy.Expr
-    ):
-        """
-        Get a list of SchedulerNode to execute in a single triton kernel.
-
-        `numel * reduction_numel` is the elements in the input
-        `numel` is the number of elements in the output
-        """
-        node_schedule = []
-        # nodes with incompatible dimensions we failed to schedule
-        nodes_to_reschedule = []
-
-        for _ in self.scheduler.iter_fixed_point():
-            for node in self.scheduler.pop_group(
-                (numel * reduction_numel, sympy.Integer(1)),
-            ):
-                if TritonKernel.is_compatible(
-                    (numel, reduction_numel), node.get_ranges()
-                ) and self.select_tiling([node], numel * reduction_numel) in (
-                    (numel * reduction_numel, sympy.Integer(1)),
-                    (numel, reduction_numel, sympy.Integer(1)),
-                ):
-                    node.mark_run()
-                    node_schedule.append(node)
-                    node.mark_fusable()
-                else:
-                    log.debug(
-                        "rescheduling for reduction (%s, %s)",
-                        (numel, reduction_numel),
-                        node.get_ranges(),
-                    )
-                    nodes_to_reschedule.append(node)
-
-            # scheduler.pop_group will keep iterating all reachable fusable nodes
-            reductions_to_mark_fusable = []
-            for node in self.scheduler.pop_group((numel, reduction_numel)):
-                node.mark_run()
-                node_schedule.append(node)
-                reductions_to_mark_fusable.append(node)
-            # mark reductions fusable later as they rely on the loop break below
-            for node in reductions_to_mark_fusable:
-                node.mark_fusable(broadcast_after_reduce=True)
-
-            node_schedule.append(DisableReduction)  # close reduction loop
-            # Add more pointwise with fewer dimensions
-            for node in self.scheduler.pop_group((numel, sympy.Integer(1))):
-                if self.select_tiling([node], numel) == (
-                    numel,
-                    sympy.Integer(1),
-                ):
-                    node.mark_run()
-                    node_schedule.append(node)
-                    node.mark_fusable()
-                else:
-                    nodes_to_reschedule.append(node)
-            node_schedule.append(EnableReduction)  # open new reduction loop
-
-            if self.is_better_tiling_ready(numel, reduction_numel):
-                # early exit to prevent a fusion that would result in worse tiling
-                break
-
-        self.scheduler.enqueue(nodes_to_reschedule)
-        return node_schedule
-
-    def maybe_promote_pointwise_to_reduction(self, node_schedule, numel):
-        """
-        Check for opportunities to convert a pointwise node into a
-        reduction node to enable more fusions.
-        """
-
-        def find_groups():
-            tiling = self.select_tiling(node_schedule, numel, sympy.Integer(1))
-
-            if len(tiling) == 3:
-                # This is already tiled, so there is only one good fusion choice
-                tile0, tile1, _ = tiling
-                yield (tile0, tile1)
-            elif len(tiling) == 2:
-                candidate_groups = list(
-                    set(
-                        itertools.chain.from_iterable(
-                            node.possible_reduction_groups() for node in node_schedule
-                        )
-                    )
-                )
-                candidate_groups.sort(key=lambda g: V.graph.sizevars.size_hint(g[1]))
-                yield from candidate_groups
-
-        for group in find_groups():
-            if self.scheduler.has_group(group):
-                return group
-
-        return (numel, sympy.Integer(1))
-
-    def codegen(self, numel, reduction_numel):
-        """
-        Generate a single triton kernel.  If reduction_numel != 1 this is
-        a reduction kernel, otherwise pointwise.
-        """
-        if reduction_numel == 1:
-            node_schedule = self.create_node_schedule_pointwise(numel)
-            numel, reduction_numel = self.maybe_promote_pointwise_to_reduction(
-                node_schedule, numel
-            )
-            if reduction_numel != 1:
-                node_schedule.extend(
-                    self.create_node_schedule_reduction(numel, reduction_numel)
-                )
-        else:
-            if self.is_better_tiling_ready(numel, reduction_numel):
-                # preempt this reduction kernel with a tiled pointwise
-                self.codegen(numel * reduction_numel, sympy.Integer(1))
-            node_schedule = self.create_node_schedule_reduction(numel, reduction_numel)
-
-        nodes = [
-            n
-            for n in node_schedule
-            if isinstance(n, torchinductor.scheduler.SchedulerNode)
-        ]
-        log.info(
-            f"codegen numel={numel} reduction_numel={reduction_numel} nodes={len(nodes)}"
-        )
-        return self.codegen_node_schedule(node_schedule, numel, reduction_numel)
+    can_fuse_vertical = can_fuse
+    can_fuse_horizontal = can_fuse
 
     def codegen_nodes(self, nodes):
+        """
+        Given a set of pre-fused nodes, generate a Triton kernel.
+        """
         _, (numel, rnumel) = max(nodes, key=lambda x: int(x.is_reduction())).group
         node_schedule = []
         current_loop_writes = set()
@@ -1182,7 +1030,7 @@ class TritonScheduling:
         def fits_in_main_body(n):
             _, (node_numel, node_rnumel) = n.group
             return (node_numel == numel and node_rnumel == rnumel) or (
-                    node_numel == numel * rnumel and node_rnumel == 1
+                node_numel == numel * rnumel and node_rnumel == 1
             )
 
         def fits_outside_reduction(n):
@@ -1193,11 +1041,13 @@ class TritonScheduling:
         def end_current_reduction_loop():
             if current_loop_writes:
                 # flush out any other runnable nodes to reduce number of loops
-                for other_node in nodes[index+1:]:
+                for other_node in nodes[index + 1 :]:
                     if (
-                            node not in done and
-                            fits_in_main_body(other_node) and
-                            not (current_loop_writes & other_node.recursive_predecessors)
+                        node not in done
+                        and fits_in_main_body(other_node)
+                        and not (
+                            current_loop_writes & other_node.recursive_predecessors
+                        )
                     ):
                         done.add(node)
                         current_loop_writes.add(node.get_name())
@@ -1380,25 +1230,6 @@ class TritonScheduling:
                 return new_groups
 
         return (numel, reduction_numel)
-
-    def is_better_tiling_ready(self, numel, reduction_numel):
-        """
-        Check for a pending node wanting a different tiling strategy
-        than the given reduction.
-        """
-        nodes = list(
-            self.scheduler.pop_group((numel * reduction_numel, sympy.Integer(1)))
-        )
-        self.scheduler.enqueue(nodes)
-
-        tiling = tuple(
-            self.select_tiling(nodes, numel * reduction_numel, sympy.Integer(1))
-        )
-        return tiling and tiling not in [
-            (numel, reduction_numel),
-            (numel, reduction_numel, sympy.Integer(1)),
-            (numel * reduction_numel, sympy.Integer(1)),
-        ]
 
     def flush(self):
         pass

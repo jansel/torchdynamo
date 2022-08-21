@@ -498,45 +498,17 @@ class CppScheduling:
             return True
         if reduce1 == () and vars1 == vars2 + reduce2:
             return True
-        # TODO(jansel): allow fusion pointwise suffix?
+        # TODO(jansel): allow fusion pointwise (vars1, ()) suffix?
         return False
 
     @classmethod
     def can_fuse_vertical(cls, node1, node2):
         return cls.can_fuse_horizontal(node1, node2) and not node1.is_reduction()
 
-    def codegen(self, *groups):
-        group, reduction_group = groups
-
-        kernel_group = self.kernel_group
-        scheduler = self.scheduler
-        with scheduler.kernel(kernel_group.new_kernel()) as kernel:
-            vars, reduction_vars = kernel.set_ranges(group, reduction_group)
-
-            # first any pointwise sharing same loops
-            for node in scheduler.pop_group((group + reduction_group, ())):
-                node.run(vars, reduction_vars)
-                node.mark_fusable()
-
-            if reduction_group:
-                # reductions
-                reduction_nodes = list(scheduler.pop_group((group, reduction_group)))
-                for node in reduction_nodes:
-                    node.run(vars, reduction_vars)
-
-                # can't fuse reduction into reduction, so do in seperate loop
-                for node in reduction_nodes:
-                    node.mark_fusable()
-
-                # we can fuse in some extra pointwise into the suffix
-                with kernel.write_to_suffix():
-                    for node in scheduler.pop_group((group, ())):
-                        node.run(vars, ())
-                        node.mark_fusable()
-
-        kernel_group.finalize_kernel(kernel, scheduler)
-
     def codegen_nodes(self, nodes):
+        """
+        Turn an set of pre-fused nodes into a C++ kernel.
+        """
         kernel_group = self.kernel_group
         scheduler = self.scheduler
         _, (group, reduction_group) = max(

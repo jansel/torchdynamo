@@ -2342,6 +2342,14 @@ class MatrixMultiply(ExternKernelOut):
             kernel=kernel,
         )
 
+    def get_template_tiling(self):
+        tile1, tile2 = self.get_size()
+        return (
+            tile1,
+            tile2,
+            sympy.Integer(1),
+        )
+
     def map_args(self):
         # a, b
         in_args = [x.codegen_reference() for x in self.inputs]
@@ -2974,6 +2982,14 @@ class Convolution(ExternKernelAlloc):
         )
 
         return inout_dict, args_dict, const_dict, other_dict
+
+    def get_template_tiling(self):
+        n, c, h, w = self.get_size()
+        return (
+            n * h * w,
+            c,
+            sympy.Integer(1),
+        )
 
 
 @dataclasses.dataclass

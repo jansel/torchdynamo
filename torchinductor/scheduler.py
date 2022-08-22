@@ -9,6 +9,7 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Set
+from typing import Union
 
 import numpy as np
 import sympy
@@ -18,6 +19,8 @@ import torch.fx as fx
 from . import config
 from . import dependencies
 from . import ir
+from .codegen.triton_template import should_use_template
+from .codegen.triton_template import template_can_fuse
 from .codegen.triton_template import template_codegen
 from .dependencies import MemoryDep
 from .dependencies import StarDep
@@ -27,16 +30,6 @@ from .utils import precompute_methods
 from .virtualized import V
 
 log = logging.getLogger(__name__)
-template_kernels = [ir.Convolution, ir.MatrixMultiply]
-
-
-def should_use_template(node: ir.ExternKernel):
-    if type(node) in template_kernels and ir.is_triton(node.get_device()):
-        if isinstance(node, ir.Convolution):
-            return node.kernel != "aten.convolution"
-        elif isinstance(node, ir.MatrixMultiply):
-            return node.kernel != "aten.mm.out"
-    return False
 
 
 class OutputNode:
@@ -73,9 +66,10 @@ class BaseSchedulerNode:
 
     def log_details(self):
         log.info(
-            "%s: unmet_dependencies = %s",
+            "%s: unmet_dependencies = %s, writes = %s",
             self,
             self.unmet_dependencies,
+            self.read_writes.writes,
         )
 
     def update_mutated_names(self, renames: Dict[str, str]):
@@ -159,17 +153,21 @@ class BaseSchedulerNode:
 
 
 class ExternKernelSchedulerNode(BaseSchedulerNode):
-    node: ir.ExternKernel
+    pass
 
+
+class TemplateSchedulerNode(BaseSchedulerNode):
     def __init__(self, scheduler: "Scheduler", node: ir.ExternKernel, group_fn):
         super().__init__(scheduler, node)
-        if should_use_template(node):
-            (self._sizes, self._stride) = node.get_group_stride()
-            self.group = (node.get_device(), group_fn(self._sizes))
-            self.set_read_writes(node.get_read_writes())
+        (self._sizes, self._stride) = node.get_group_stride()
+        self.group = (node.get_device(), group_fn(self._sizes))
+        self.set_read_writes(node.get_read_writes())
+        self.update_dep_type()
+
+    def is_template(self):
+        return True
 
     def update_dep_type(self):
-        assert type(self.node) in template_kernels
         assert len(self.read_writes.writes) == 1
         write = self.read_writes.writes.pop()
         if isinstance(write, StarDep):
@@ -183,14 +181,9 @@ class ExternKernelSchedulerNode(BaseSchedulerNode):
     def get_ranges(self):
         return self._sizes
 
-    def run(self, codegen_extern_call):
-        self.allocate()
-        codegen_extern_call(self)
-
 
 class NopKernelSchedulerNode(BaseSchedulerNode):
-    def run(self):
-        self.allocate()
+    pass
 
 
 def pick_loop_order(stride_lengths, sizes, priority_idx=[]):
@@ -405,11 +398,6 @@ class FusedSchedulerNode(BaseSchedulerNode):
     def __repr__(self):
         return f"{type(self).__name__}(nodes={self.get_name()})"
 
-    def prune_deps(self):
-        for node in self.snodes:
-            node.prune_deps()
-        super().prune_deps()
-
     def is_reduction(self):
         return any(x.is_reduction() for x in self.snodes)
 
@@ -519,6 +507,9 @@ def create_fx_from_snodes(snodes: List[BaseSchedulerNode]) -> fx.Graph:
         if isinstance(snode, ExternKernelSchedulerNode):
             node_type = "extern"
             group = node_type
+        elif isinstance(snode, TemplateSchedulerNode):
+            node_type = "template"
+            group = node_type
         elif isinstance(snode, NopKernelSchedulerNode):
             node_type = "nop"
             group = node_type
@@ -594,9 +585,11 @@ class Scheduler:
             elif isinstance(node, ir.ComputedBuffer):
                 group_fn = self.get_backend(node.get_device()).group_fn
                 self.nodes.append(SchedulerNode(self, node, group_fn))
-            elif isinstance(node, ir.ExternKernel):
+            elif isinstance(node, ir.ExternKernel) and should_use_template(node):
                 group_fn = self.get_backend(node.get_device()).group_fn
-                self.nodes.append(ExternKernelSchedulerNode(self, node, group_fn))
+                self.nodes.append(TemplateSchedulerNode(self, node, group_fn))
+            elif isinstance(node, ir.ExternKernel):
+                self.nodes.append(ExternKernelSchedulerNode(self, node))
             else:
                 assert False, node
         # some new constants could have been created above
@@ -881,20 +874,20 @@ class Scheduler:
         Determine if it is possible to combine node1 and node2 into a
         single fused node.
         """
-
         if node1 is node2:
             return False
         if isinstance(node1, (ExternKernelSchedulerNode, NopKernelSchedulerNode)):
-            # TODO(jansel): fuse templates
             return False
         if isinstance(node2, (ExternKernelSchedulerNode, NopKernelSchedulerNode)):
             return False
         if node2.get_names() & node1.recursive_predecessors:
-            return False
+            return False  # node2 must go before node1
+        if node2.is_template():
+            return False  # only epilogues
 
         device = node1.get_device()
         if device != node2.get_device():
-            return False
+            return False  # wrong device
 
         no_shared_data = self.score_fusion_memory(node1, node2) == 0
         if no_shared_data and (
@@ -904,11 +897,14 @@ class Scheduler:
 
         if node1.get_names() & node2.recursive_predecessors:
             # node2 depends on node1 outputs
-            return self.can_fuse_vertical(node1, node2) and self.get_backend(
-                device
-            ).can_fuse_vertical(node1, node2)
-        else:
-            # nodes don't depend on each other, but may have common reads
+            if not self.can_fuse_vertical(node1, node2):
+                return False
+            if node1.is_template():
+                return template_can_fuse(node1, node2)
+            return self.get_backend(device).can_fuse_vertical(node1, node2)
+        else:  # nodes don't depend on each other, but may have common reads
+            if node1.is_template():
+                return False
             return self.get_backend(device).can_fuse_horizontal(node1, node2)
 
     def can_fuse_vertical(self, node1, node2):
@@ -1021,12 +1017,18 @@ class Scheduler:
 
     def codegen_extern_call(self, scheduler_node: ExternKernelSchedulerNode):
         assert isinstance(scheduler_node, ExternKernelSchedulerNode)
-        node = scheduler_node.node
         self.flush()
-        if should_use_template(node):
-            template_codegen(self, scheduler_node)
-        else:
-            node.codegen(V.graph.wrapper_code)
+        scheduler_node.allocate()
+        node = scheduler_node.node
+        node.codegen(V.graph.wrapper_code)
+
+    def codegen_template_call(
+        self, scheduler_node: Union[FusedSchedulerNode, TemplateSchedulerNode]
+    ):
+        self.flush()
+        node, *epilogue = scheduler_node.get_nodes()
+        node.allocate()
+        template_codegen(self, node, epilogue)
 
     def create_backend(self, device: torch.device):
         assert (
@@ -1050,21 +1052,22 @@ class Scheduler:
     def codegen(self):
         for node in self.nodes:
             self.buffer_names_no_longer_needed.update(node.last_usage)
-
-            if isinstance(node, NopKernelSchedulerNode):
-                node.run()
-            else:
+            if not isinstance(node, NopKernelSchedulerNode):
                 device = node.get_device()
                 if device != self.current_device:
                     self.flush()
                     self.current_device = device
 
-            if isinstance(node, (FusedSchedulerNode, SchedulerNode)):
+            if node.is_template():
+                self.codegen_template_call(node)
+                self.free_buffers()
+            elif isinstance(node, (FusedSchedulerNode, SchedulerNode)):
                 self.get_backend(device).codegen_nodes(node.get_nodes())
             elif isinstance(node, ExternKernelSchedulerNode):
-                node.run(self.codegen_extern_call)
+                self.codegen_extern_call(node)
                 self.free_buffers()
-
+            else:
+                assert isinstance(node, NopKernelSchedulerNode)
+                node.allocate()
             self.buffer_names_to_free.update(node.last_usage)
-
         self.flush()

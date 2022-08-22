@@ -271,7 +271,6 @@ class TritonTemplateKernel(TritonKernel):
         args_kwargs = args + ", " + self_const_kwargs
         wrapper.writeline(self.gen_grid(name))
         wrapper.writeline(f"{name}[grid_{name}]({args_kwargs})")
-        V.graph.counters["cuda_kernel_calls"] += 1
 
 
 def template_codegen(scheduler, scheduler_node):

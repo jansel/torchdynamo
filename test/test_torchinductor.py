@@ -1441,7 +1441,7 @@ class CommonTemplate:
     def test_triton_mm2(self):
         @torchdynamo.optimize("inductor", nopython=True)
         def fn(x, y):
-            return torch.mm(x, y)
+            return torch.relu(torch.mm(x, y))
 
         N = 1024
         a = torch.randn([N, N], device=self.device, dtype=torch.float32)

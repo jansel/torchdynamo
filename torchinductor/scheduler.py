@@ -1,11 +1,9 @@
 import collections
-import contextlib
 import dataclasses
 import functools
 import itertools
 import logging
 import os
-import re
 from typing import Any
 from typing import Dict
 from typing import List
@@ -64,11 +62,11 @@ class BaseSchedulerNode:
         self.node: ir.Buffer = node
         self.users: Optional[List[NodeUser]] = None
         self.inverse_users: List[BaseSchedulerNode] = []
-        self.recursive_predecessors: Optional[Set[str]] = None
         self.set_read_writes(node.get_read_writes())
-        self.min_order = None
-        self.max_order = None
-        self.last_usage = None
+        self.recursive_predecessors: Optional[Set[str]] = None
+        self.min_order: Optional[int] = None
+        self.max_order: Optional[int] = None
+        self.last_usage: Set[str] = None  # buffers that won't be used after this kernel
 
     def __repr__(self):
         return f"{type(self).__name__}(name={self.get_name()!r})"
@@ -170,9 +168,6 @@ class ExternKernelSchedulerNode(BaseSchedulerNode):
             self.group = (node.get_device(), group_fn(self._sizes))
             self.set_read_writes(node.get_read_writes())
 
-    def can_remove_buffer(self, **kwargs):
-        return False
-
     def update_dep_type(self):
         assert type(self.node) in template_kernels
         assert len(self.read_writes.writes) == 1
@@ -194,9 +189,6 @@ class ExternKernelSchedulerNode(BaseSchedulerNode):
 
 
 class NopKernelSchedulerNode(BaseSchedulerNode):
-    def can_remove_buffer(self, **kwargs):
-        return False
-
     def run(self):
         self.allocate()
 
@@ -266,28 +258,6 @@ class SchedulerNode(BaseSchedulerNode):
             # self.read_writes.writes = self.read_writes.writes | {
             #     w.maybe_swap_sizes() for w in self.read_writes.writes
             # }
-
-    def can_remove_buffer(self, check_group):
-        # TODO(jansel): can we delete this entire thing?
-        if (
-            self.is_reduction()
-            and len(self.users) == 1
-            and isinstance(self.users[0].node, SchedulerNode)
-            and len(self.users[0].node.unmet_dependencies) == 1  # XX update this
-        ):
-            user = self.users[0].node
-            if not check_group(user):
-                return False
-            dep = next(iter(user.unmet_dependencies))
-            writes = self.read_writes.writes
-            if self._sizes[-1] != 1:
-                writes = set(writes)
-                writes.update(
-                    [w.broadcast_extend_sizes(self._sizes[-1]) for w in writes]
-                )
-            # this will get fused into us, so we don't need to keep the buffer
-            return not user.is_reduction() and dep in writes
-        return False
 
     def get_ranges(self):
         return self._sizes
@@ -473,9 +443,6 @@ class FusedSchedulerNode(BaseSchedulerNode):
         raise NotImplementedError
 
     def can_free(self):
-        raise NotImplementedError
-
-    def can_remove_buffer(self, check_group):
         raise NotImplementedError
 
 
@@ -797,7 +764,7 @@ class Scheduler:
                 updated_nodes.append(node)
             else:
                 # dead code
-                log.info("removed dead node: %s", node.get_name())
+                log.debug("removed dead node: %s", node.get_name())
                 V.graph.removed_buffers.add(node.get_name())
         self.nodes = updated_nodes
 
@@ -1086,20 +1053,17 @@ class Scheduler:
 
             if isinstance(node, NopKernelSchedulerNode):
                 node.run()
-                self.buffer_names_to_free.update(node.last_usage)
-                continue
+            else:
+                device = node.get_device()
+                if device != self.current_device:
+                    self.flush()
+                    self.current_device = device
 
-            device = node.get_device()
-            if device != self.current_device:
-                self.flush()
-                self.current_device = device
-
-            if isinstance(node, ExternKernelSchedulerNode):
+            if isinstance(node, (FusedSchedulerNode, SchedulerNode)):
+                self.get_backend(device).codegen_nodes(node.get_nodes())
+            elif isinstance(node, ExternKernelSchedulerNode):
                 node.run(self.codegen_extern_call)
                 self.free_buffers()
-            else:
-                assert isinstance(node, (FusedSchedulerNode, SchedulerNode))
-                self.get_backend(device).codegen_nodes(node.get_nodes())
 
             self.buffer_names_to_free.update(node.last_usage)
 

@@ -56,7 +56,7 @@ tune_layout = False
 # 3: Always dumps the last graph ran out to minify_repro.py, useful for segfaults/irrecoverable errors
 repro_level = int(os.environ.get("INDUCTOR_REPRO_LEVEL", 0))
 
-# fuse even in cases where it doesn't reduce memory usage
+# fuse even in cases without common reads
 aggressive_fusion = True
 
 # maximum iterations of fusions to do

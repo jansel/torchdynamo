@@ -9,9 +9,9 @@ import sympy
 from sympy import Expr
 from sympy import Integer
 from sympy import Symbol
-from torch.fx.immutable_collections import immutable_dict
 
 from .utils import freeze_inputs
+from .utils import immutable_dict
 from .virtualized import V
 
 log = logging.getLogger(__name__)

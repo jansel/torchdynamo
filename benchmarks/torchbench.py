@@ -137,7 +137,6 @@ SLOW_BENCHMARKS = {
     *VERY_SLOW_BENCHMARKS,
     "BERT_pytorch",  # 137s
     "demucs",  # 116s
-    "fambench_dlrm",  # 144s
     "fastNLP_Bert",  # 242s
     "hf_Albert",  # 221s
     "hf_Bart",  # 400s

@@ -1,15 +1,20 @@
 import collections
 import contextlib
+import functools
 import itertools
 import logging
 import os.path
 from typing import Any
 from typing import List
-from unittest.mock import patch
 
 import torch
 from torch import fx as fx
 
+from torchdynamo.debug_utils import save_graph_repro
+from torchdynamo.debug_utils import wrap_debug
+from torchdynamo.utils import init_logging
+
+from . import config
 from . import ir
 from .codecache import cache_dir
 from .scheduler import BaseSchedulerNode
@@ -19,6 +24,9 @@ from .scheduler import NopKernelSchedulerNode
 from .scheduler import OutputNode
 from .scheduler import SchedulerNode
 from .scheduler import TemplateSchedulerNode
+from .virtualized import V
+
+log = logging.getLogger(__name__)
 
 
 def draw_buffers(nodes, print_graph=False):
@@ -146,34 +154,88 @@ def create_fx_from_snodes(snodes: List[BaseSchedulerNode]) -> fx.Graph:
     return graph
 
 
-class DebugDirectory:
+class DebugContext:
     _counter = itertools.count()
 
-    def __init__(self):
-        for n in self._counter:
+    @staticmethod
+    def wrap(fn):
+        @functools.wraps(fn)
+        def inner(*args, **kwargs):
+            with DebugContext():
+                return fn(*args, **kwargs)
+
+        return wrap_debug(inner, compiler_name="inductor")
+
+    @staticmethod
+    def create_debug_dir():
+        for n in DebugContext._counter:
             dirname = os.path.join(cache_dir(), f"debug.{os.getpid()}.{n}")
             if not os.path.exists(dirname):
-                break
-        os.makedirs(dirname)
-        self._path = dirname
+                os.makedirs(dirname)
+                return dirname
+
+    def __init__(self):
+        self._path = None
+        self._stack = contextlib.ExitStack()
 
     def fopen(self, filename):
-        return open(os.path.join(self._path, filename), "wa")
+        assert self._path
+        return open(os.path.join(self._path, filename), "w")
 
-    @contextlib.contextmanager
-    def capture_logging(self):
-        with contextlib.ExitStack() as stack, self.fopen("debug.log") as fd:
-            ch = logging.StreamHandler(fd)
-            ch.setLevel(logging.DEBUG)
-            ch.setFormatter(
-                logging.Formatter("[%(filename)s:%(lineno)d %(levelname)s] %(message)s")
-            )
-            log = logging.getLogger("torchinductor")
-            for handler in log.handlers:
-                stack.enter_context(
-                    patch.object(handler, "level", max(handler.level, log.level))
-                )
-            stack.enter_context(patch.object(handler, "level", logging.DEBUG))
-            log.addHandler(ch)
-            yield
-            log.removeHandler(ch)
+    def __enter__(self):
+        log = logging.getLogger("torchinductor")
+        if not log.handlers:
+            init_logging()
+
+        for handler in itertools.chain([log], log.handlers):
+            handler.setLevel(logging.DEBUG if config.debug else logging.WARNING)
+
+        self._stack.enter_context(V.set_debug_handler(self))
+
+        if not config.trace.enabled:
+            return
+
+        self._path = self.create_debug_dir()
+
+        if config.trace.log:
+            self._setup_log_capture("debug.log", logging.DEBUG)
+            self._setup_log_capture("info.log", logging.INFO)
+
+    def _setup_log_capture(self, filename, level):
+        log = logging.getLogger("torchinductor")
+        fd = self._stack.enter_context(self.fopen(filename))
+        ch = logging.StreamHandler(fd)
+        ch.setLevel(level)
+        ch.setFormatter(
+            logging.Formatter("[%(filename)s:%(lineno)d %(levelname)s] %(message)s")
+        )
+        log.addHandler(ch)
+        log.setLevel(min(log.level, level))
+        self._stack.callback(log.removeHandler, ch)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        log.warning("Debug trace written to %s", self._path)
+        self._stack.close()
+
+    def __getattr__(self, name):
+        if config.trace.enabled and getattr(config.trace, name):
+            try:
+                return getattr(DebugFormatter(self), name)
+            except Exception:
+                log.warning("Ignoring exception in debug code", exc_info=True)
+        else:
+
+            def ignored(*args, **kwargs):
+                pass
+
+            return ignored
+
+
+class DebugFormatter:
+    def __init__(self, handler):
+        self.fopen = handler.fopen
+        self.handler = handler
+
+    def fx_graph(self, gm, inputs):
+        with self.fopen("fx_graph.py") as fd:
+            save_graph_repro(fd, gm, inputs, "inductor")

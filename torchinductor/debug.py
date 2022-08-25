@@ -214,7 +214,8 @@ class DebugContext:
         self._stack.callback(log.removeHandler, ch)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        log.warning("Debug trace written to %s", self._path)
+        if self._path:
+            log.warning("Debug trace written to %s", self._path)
         self._stack.close()
 
     def __getattr__(self, name):

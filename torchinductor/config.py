@@ -1,5 +1,5 @@
 # add some debug printouts
-debug = True
+debug = False
 
 # dead code elimination
 dce = False
@@ -114,6 +114,6 @@ class triton:
 
 # create a directory containing lots of debug information
 class trace:
-    enabled = True  # master switch for all debugging flags
+    enabled = False  # master switch for all debugging flags
     log = True
     fx_graph = True

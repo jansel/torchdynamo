@@ -1,18 +1,24 @@
 import collections
+import contextlib
+import itertools
+import logging
+import os.path
 from typing import Any
 from typing import List
+from unittest.mock import patch
 
 import torch
 from torch import fx as fx
 
-from torchinductor import ir
-from torchinductor.scheduler import BaseSchedulerNode
-from torchinductor.scheduler import ExternKernelSchedulerNode
-from torchinductor.scheduler import FusedSchedulerNode
-from torchinductor.scheduler import NopKernelSchedulerNode
-from torchinductor.scheduler import OutputNode
-from torchinductor.scheduler import SchedulerNode
-from torchinductor.scheduler import TemplateSchedulerNode
+from . import ir
+from .codecache import cache_dir
+from .scheduler import BaseSchedulerNode
+from .scheduler import ExternKernelSchedulerNode
+from .scheduler import FusedSchedulerNode
+from .scheduler import NopKernelSchedulerNode
+from .scheduler import OutputNode
+from .scheduler import SchedulerNode
+from .scheduler import TemplateSchedulerNode
 
 
 def draw_buffers(nodes, print_graph=False):
@@ -138,3 +144,36 @@ def create_fx_from_snodes(snodes: List[BaseSchedulerNode]) -> fx.Graph:
 
     graph.output(outputs[0] if len(outputs) == 1 else tuple(outputs))
     return graph
+
+
+class DebugDirectory:
+    _counter = itertools.count()
+
+    def __init__(self):
+        for n in self._counter:
+            dirname = os.path.join(cache_dir(), f"debug.{os.getpid()}.{n}")
+            if not os.path.exists(dirname):
+                break
+        os.makedirs(dirname)
+        self._path = dirname
+
+    def fopen(self, filename):
+        return open(os.path.join(self._path, filename), "wa")
+
+    @contextlib.contextmanager
+    def capture_logging(self):
+        with contextlib.ExitStack() as stack, self.fopen("debug.log") as fd:
+            ch = logging.StreamHandler(fd)
+            ch.setLevel(logging.DEBUG)
+            ch.setFormatter(
+                logging.Formatter("[%(filename)s:%(lineno)d %(levelname)s] %(message)s")
+            )
+            log = logging.getLogger("torchinductor")
+            for handler in log.handlers:
+                stack.enter_context(
+                    patch.object(handler, "level", max(handler.level, log.level))
+                )
+            stack.enter_context(patch.object(handler, "level", logging.DEBUG))
+            log.addHandler(ch)
+            yield
+            log.removeHandler(ch)

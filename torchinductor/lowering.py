@@ -308,7 +308,12 @@ def _to_copy(
     assert not layout or layout == torch.strided, "TODO"
     assert not pin_memory, "TODO"
     assert not memory_format, "TODO"
+    if device:
+        device = decode_device(device)
     if device is not None and device != x.get_device():
+        if dtype is not None and device.type == "cpu":
+            # CPU can do fewer type conversions
+            x = to_dtype(x, decode_dtype(dtype))
         x = to_device(x, device)
     if dtype is not None:
         x = to_dtype(x, decode_dtype(dtype))
@@ -433,6 +438,15 @@ def squeeze(x, dim=None):
     removed = new_shape.pop(dim)
     assert removed == 1, removed
     return view(x, new_shape)
+
+
+@register_lowering([aten.squeeze_])
+def squeeze_(x, dim=None):
+    val = squeeze(x, dim)
+    assert isinstance(x, TensorBox)
+    assert isinstance(val, TensorBox)
+    x.data = val.data
+    return x
 
 
 @register_lowering(aten.expand, type_promote=False)

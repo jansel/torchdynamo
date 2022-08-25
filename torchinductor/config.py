@@ -1,5 +1,5 @@
 # add some debug printouts
-debug = False
+debug = True
 
 # dead code elimination
 dce = False
@@ -110,3 +110,10 @@ class triton:
     # should we stop a fusion to allow better tiling?
     tiling_prevents_pointwise_fusion = True
     tiling_prevents_reduction_fusion = True
+
+
+# create a directory containing lots of debug information
+class trace:
+    enabled = True  # master switch for all debugging flags
+    log = True
+    fx_graph = True

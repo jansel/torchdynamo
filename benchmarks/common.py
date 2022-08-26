@@ -17,8 +17,10 @@ import warnings
 import numpy as np
 import pandas as pd
 import torch
+from microbenchmarks.operator_inp_utils import OperatorInputsMode
 from scipy.stats import gmean
 from scipy.stats import ttest_ind
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.utils._pytree import tree_map
 
 import torchdynamo
@@ -29,7 +31,6 @@ from torchdynamo.optimizations.inference import fixed_strategy2
 from torchdynamo.optimizations.inference import offline_autotuner
 from torchdynamo.optimizations.inference import online_autotuner
 from torchdynamo.optimizations.log_args import conv_args_analysis
-from torchdynamo.optimizations.python_key import python_key
 from torchdynamo.profiler import Profiler
 from torchdynamo.profiler import fx_insert_profiling
 from torchdynamo.testing import CompileCounterWithBackend
@@ -840,10 +841,6 @@ class BenchmarkRunner:
         return set()
 
     @property
-    def failing_python_key_models(self):
-        return set()
-
-    @property
     def failing_torchinductor_models(self):
         return set()
 
@@ -1183,7 +1180,11 @@ def parse_args():
         action="store_true",
         help="dump raw timing metrics from speedup experiment",
     )
-
+    parser.add_argument(
+        "--log-operator-inputs",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument(
         "--channels-last",
         action="store_true",
@@ -1567,12 +1568,6 @@ def main(runner, original_dir=None):
         optimize_ctx = torchdynamo.optimize(offline_autotuner, nopython=args.nopython)
         experiment = speedup_experiment
         output_filename = "speedups.csv"
-    elif args.python_key:
-        optimize_ctx = torchdynamo.optimize(python_key, nopython=args.nopython)
-        experiment = speedup_experiment
-        output_filename = "pythonkey.csv"
-        if not args.no_skip:
-            runner.skip_models.update(runner.failing_python_key_models)
     elif args.speedup_ltc:
         optimize_ctx = torchdynamo.optimize(
             backends.ltc_reuse_graph, nopython=args.nopython
@@ -1750,6 +1745,15 @@ def main(runner, original_dir=None):
             current_batch_size = batch_size
             set_model_name(name)
 
+            if args.float32:
+                model, example_inputs = cast_to_fp32(model, example_inputs)
+            elif args.float16:
+                model, example_inputs = cast_to_fp16(model, example_inputs)
+
+            if args.log_operator_inputs:
+                log_operator_inputs(model, example_inputs, model_iter_fn, name, args)
+                continue
+
             runner.run_one_model(
                 name,
                 model,
@@ -1788,6 +1792,40 @@ def main(runner, original_dir=None):
                         output_filename, [], [device, name, placeholder_batch_size, 0.0]
                     )
         print_summary(output_filename)
+
+
+def log_operator_inputs(model, example_inputs, model_iter_fn, name, args):
+    mode = "training" if args.training else "eval"
+    output = os.path.join(os.path.dirname(args.output), f"{name}_{mode}.txt")
+
+    # TODO - add option for coalescing inputs over multiple runs
+    if os.path.exists(output):
+        print(f"Skipping {name}, {output} already exists")
+        return
+
+    print(f"Running {name}")
+
+    operator_mode = OperatorInputsMode()
+    fake_tensor_mode = FakeTensorMode()
+
+    with torch._subclasses.fake_tensor.FakeCopyMode(fake_tensor_mode):
+        model_fake = copy.deepcopy(model)
+        example_inputs_fake = copy.deepcopy(example_inputs)
+    try:
+        with fake_tensor_mode, operator_mode:
+            model_iter_fn(model_fake, example_inputs_fake, collect_outputs=False)
+    except Exception as e:
+        print(f"{name} failed to run with fake tensors, trying real. Exception: {e}")
+        operator_mode = OperatorInputsMode()
+        try:
+            with operator_mode:
+                model_iter_fn(model, example_inputs, collect_outputs=False)
+        except Exception as e2:
+            print(f"{name} failed to run with real. Exception: {e2}")
+            raise
+
+    print(f"Writing output to {output}")
+    operator_mode.log_to_file(output)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import contextlib
 import gc
 import importlib
 import logging
@@ -8,11 +9,13 @@ import sys
 import warnings
 from os.path import abspath
 from os.path import exists
+from unittest.mock import patch
 
 import torch
 from common import BenchmarkRunner
 from common import main
 
+import torchdynamo
 from torchdynamo.testing import collect_results
 from torchdynamo.testing import reduce_to_scalar_loss
 from torchdynamo.utils import clone_inputs
@@ -323,11 +326,26 @@ class TorchBenchmarkRunner(BenchmarkRunner):
 
             yield model_name
 
+    @contextlib.contextmanager
     def pick_grad(self, name, is_training):
-        if is_training or name in ("maml",):
-            return torch.enable_grad()
-        else:
-            return torch.no_grad()
+        with contextlib.ExitStack() as stack:
+            if is_training or name in ("maml",):
+                stack.enter_context(torch.enable_grad())
+            else:
+                stack.enter_context(torch.no_grad())
+
+            if name in (
+                # https://github.com/pytorch/torchdynamo/issues/1062
+                "detectron2_fasterrcnn_r_101_fpn",
+                "detectron2_fasterrcnn_r_50_fpn",
+                "detectron2_maskrcnn_r_101_fpn",
+                "detectron2_maskrcnn_r_50_fpn",
+            ):
+                stack.enter_context(
+                    patch.object(torchdynamo.config, "fake_tensor_propagation", False)
+                )
+
+            yield
 
     def get_tolerance_and_cosine_flag(self, is_training, current_device, name):
         tolerance = 1e-4

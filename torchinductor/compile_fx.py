@@ -44,9 +44,9 @@ def compile_fx_inner(
     wrap=identity,
     cudagraphs=None,
     num_fixed=0,
-    is_backwards=False,
+    is_backward=False,
 ):
-    log.info("Compiling %s graph", "BACKWARDS" if is_backwards else "FORWARDS")
+    log.info("Compiling %s graph", "BACKWARDS" if is_backward else "FORWARDS")
     V.debug.fx_graph(gm, example_inputs)
 
     if cudagraphs is None:
@@ -183,7 +183,7 @@ def compile_fx(model_: torch.fx.GraphModule, example_inputs_: List[torch.Tensor]
             example_inputs,
             num_fixed=fixed,
             cudagraphs=cudagraphs,
-            is_backwards=True,
+            is_backward=True,
         )
 
     with overrides.patch_functions():

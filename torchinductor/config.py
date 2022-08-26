@@ -112,5 +112,6 @@ class triton:
 # create a directory containing lots of debug information
 class trace:
     enabled = False  # master switch for all debugging flags
-    log = True
+    info_log = True
+    debug_log = True
     fx_graph = True

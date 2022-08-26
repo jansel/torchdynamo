@@ -197,8 +197,9 @@ class DebugContext:
 
         self._path = self.create_debug_dir()
 
-        if config.trace.log:
+        if config.trace.debug_log:
             self._setup_log_capture("debug.log", logging.DEBUG)
+        if config.trace.info_log:
             self._setup_log_capture("info.log", logging.INFO)
 
     def _setup_log_capture(self, filename, level):

@@ -1,7 +1,6 @@
 import dataclasses
 import functools
 import logging
-import operator
 from typing import List
 
 import torch.fx
@@ -10,7 +9,6 @@ from functorch.compile import min_cut_rematerialization_partition
 import torchdynamo
 from torchdynamo.optimizations.backends import aot_autograd
 from torchdynamo.optimizations.normalize import normalize_ir
-from torchdynamo.testing import same
 from torchdynamo.utils import identity
 
 from . import config
@@ -19,7 +17,6 @@ from .debug import DebugContext
 from .decomposition import select_decomp_table
 from .graph import GraphLowering
 from .utils import ceildiv
-from .utils import gen_gm_and_inputs
 from .virtualized import V
 
 log = logging.getLogger(__name__)
@@ -49,6 +46,7 @@ def compile_fx_inner(
     num_fixed=0,
     is_backwards=False,
 ):
+    log.info("Compiling %s graph", "BACKWARDS" if is_backwards else "FORWARDS")
     V.debug.fx_graph(gm, example_inputs)
 
     if cudagraphs is None:

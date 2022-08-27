@@ -1,18 +1,25 @@
 import collections
 import contextlib
+import cProfile
 import functools
 import itertools
 import logging
 import os.path
+import pstats
 import shutil
 import subprocess
 from typing import Any
 from typing import List
 
 import torch
+from functorch.compile import draw_graph
+from functorch.compile import get_graph_being_compiled
 from torch import fx as fx
+from torch.fx.graph_module import GraphModule
+from torch.fx.passes.shape_prop import TensorMetadata
+from torch.fx.passes.tools_common import legalize_graph
 
-import torchinductor.scheduler
+import torchinductor
 from torchdynamo.debug_utils import save_graph_repro
 from torchdynamo.debug_utils import wrap_debug
 from torchdynamo.utils import init_logging
@@ -46,15 +53,8 @@ def draw_buffers(nodes, print_graph=False, fname=None):
     Draw a graph in fname.svg.
     nodes is a list of SchedulerNode objects.
     """
-
-    from functorch.compile import draw_graph
-    from functorch.compile import get_graph_being_compiled
-    from torch.fx.graph_module import GraphModule
-    from torch.fx.passes.shape_prop import TensorMetadata
-    from torch.fx.passes.tools_common import legalize_graph
-
     if not has_dot():
-        log.warning("graph_diagram requires `graphviz` package installed")
+        log.warning("draw_buffers() requires `graphviz` package")
         return
 
     if fname is None:
@@ -192,10 +192,13 @@ class DebugContext:
                 return dirname
 
     def __init__(self):
+        self._prof = None
         self._path = None
         self._stack = contextlib.ExitStack()
 
     def rename(self, new_path: str):
+        if not self._path:
+            return
         assert new_path.endswith(".debug"), new_path
         if os.path.exists(new_path):
             shutil.rmtree(new_path)
@@ -209,6 +212,9 @@ class DebugContext:
     def fopen(self, filename):
         assert self._path
         return open(os.path.join(self._path, filename), "w")
+
+    def filename(self, suffix):
+        return os.path.join(self._path, suffix)
 
     def __enter__(self):
         log = logging.getLogger("torchinductor")
@@ -229,6 +235,9 @@ class DebugContext:
             self._setup_log_capture("debug.log", logging.DEBUG)
         if config.trace.info_log:
             self._setup_log_capture("info.log", logging.INFO)
+        if config.trace.compile_profile:
+            self._prof = cProfile.Profile()
+            self._prof.enable()
 
     def _setup_log_capture(self, filename, level):
         log = logging.getLogger("torchinductor")
@@ -243,9 +252,23 @@ class DebugContext:
         self._stack.callback(log.removeHandler, ch)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._prof:
+            self._prof.disable()
+            self._save_profile_data()
+
         if self._path:
-            log.warning("Debug trace written to %s", self._path)
+            log.warning("%s debug trace: %s", get_graph_being_compiled(), self._path)
         self._stack.close()
+
+    def _save_profile_data(self):
+        self._prof.dump_stats(self.filename("compile.prof"))
+        with self.fopen("compile.stats") as fd:
+            stats = pstats.Stats(self._prof, stream=fd)
+            stats.strip_dirs()
+            stats.sort_stats("cumtime")
+            stats.print_stats(100)
+            stats.sort_stats("tottime")
+            stats.print_stats(100)
 
     def __getattr__(self, name):
         if config.trace.enabled and getattr(config.trace, name):
@@ -267,11 +290,8 @@ SchedulerNodeList = List["torchinductor.scheduler.BaseSchedulerNode"]
 class DebugFormatter:
     def __init__(self, handler):
         self.fopen = handler.fopen
-        self._path = handler._path
+        self.filename = handler.filename
         self.handler = handler
-
-    def filename(self, suffix):
-        return os.path.join(self.handler._path, suffix)
 
     def fx_graph(self, gm: torch.fx.GraphModule, inputs: List[torch.Tensor]):
         with self.fopen("fx_graph.py") as fd:

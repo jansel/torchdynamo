@@ -15,7 +15,6 @@ from typing import Union
 import numpy as np
 import sympy
 import torch
-import xformers.triton.k_activations
 
 from . import config
 from . import dependencies

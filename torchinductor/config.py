@@ -1,7 +1,5 @@
 import os
 
-import torchinductor
-
 # add some debug printouts
 debug = False
 
@@ -109,13 +107,29 @@ class triton:
 
 # create a directory containing lots of debug information
 class trace:
-    # master switch for all debugging flags
+    # master switch for all debugging flags below
     enabled = os.environ.get("TORCHINDUCTOR_TRACE", "0") == "1"
 
+    # Save python logger call >=logging.DEBUG
     debug_log = True
+
+    # Save python logger call >=logging.INFO
     info_log = False
+
+    # Save input FX graph (post decomps)
     fx_graph = True
+
+    # Save TorchInductor IR before fusion pass
     ir_pre_fusion = True
+
+    # Save TorchInductor IR after fusion pass
     ir_post_fusion = True
-    graph_diagram = True
+
+    # Copy generated code to trace dir
     output_code = True
+
+    # SVG figure showing post-fusion graph
+    graph_diagram = False
+
+    # Store cProfile (see snakeviz to view)
+    compile_profile = False

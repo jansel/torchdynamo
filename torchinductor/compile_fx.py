@@ -6,7 +6,6 @@ from typing import List
 import torch.fx
 from functorch.compile import min_cut_rematerialization_partition
 
-import torchdynamo
 from torchdynamo.optimizations.backends import aot_autograd
 from torchdynamo.optimizations.normalize import normalize_ir
 from torchdynamo.utils import identity

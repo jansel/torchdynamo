@@ -3,7 +3,6 @@ import dataclasses
 import functools
 import itertools
 import logging
-import pprint
 import re
 import textwrap
 from collections import OrderedDict
@@ -3242,7 +3241,7 @@ class LoopBody:
         self.indexing = None
 
     def debug_str(self):
-        lines = [f"var_ranges = {pprint.pformat(dict(self.var_ranges), compact=True)}"]
+        lines = [f"var_ranges = {dict(self.var_ranges)}"]
         lines.extend([f"{name} = {val}" for name, val in self.indexing_exprs.items()])
         lines.extend(
             [
@@ -3398,5 +3397,5 @@ class LoopBodyBlock:
     def debug_str(self, name="block"):
         code = self.make_gm().code
         return re.sub(
-            f";[^\n]*", "", code.strip().replace("def forward(", f"def {name}(")
+            r";[^\n]*", "", code.strip().replace("def forward(", f"def {name}(")
         )

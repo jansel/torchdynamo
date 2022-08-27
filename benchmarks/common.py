@@ -1511,6 +1511,7 @@ def main(runner, original_dir=None):
             {
                 # torchbench
                 "hf_Longformer",
+                "hf_BigBird",
                 "timm_nfnet",
                 "timm_efficientdet",
                 # timm

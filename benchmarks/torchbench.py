@@ -340,6 +340,8 @@ class TorchBenchmarkRunner(BenchmarkRunner):
                 "detectron2_fasterrcnn_r_50_fpn",
                 "detectron2_maskrcnn_r_101_fpn",
                 "detectron2_maskrcnn_r_50_fpn",
+                # https://github.com/pytorch/torchdynamo/issues/1065
+                "moco",
             ):
                 stack.enter_context(
                     patch.object(torchdynamo.config, "fake_tensor_propagation", False)

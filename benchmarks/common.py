@@ -1537,6 +1537,10 @@ def main(runner, original_dir=None):
             runner.skip_models.add("hf_T5")
         if args.inductor_settings:
             runner.skip_models.update({"dhen_5x_dense_over"})
+        if args.inductor_settings and args.training:
+            runner.skip_models.update(
+                {"ctr_mbl_feed_30x_dense_over", "ctr_mbl_feed_30x_over", "dhen_5x_over"}
+            )
 
     if torchdynamo.config.dynamic_shapes:
         # TODO(jansel): fix bugs in these

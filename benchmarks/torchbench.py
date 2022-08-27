@@ -193,6 +193,11 @@ INDUCTOR_INFERENCE_NOT_YET_WORKING = {
 
 INDUCTOR_TRAINING_NOT_YET_WORKING = {
     *INDUCTOR_INFERENCE_NOT_YET_WORKING,
+    # TypeError: expected Tensor as element 0 in argument 1, but got NoneType
+    "dlrm",
+    # RuntimeError: expected scalar type Float but found Half
+    "mobilenet_v2_quantized_qat",
+    "resnet50_quantized_qat",
 }
 
 TRT_NOT_YET_WORKING = {

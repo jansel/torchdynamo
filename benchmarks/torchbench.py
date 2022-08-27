@@ -187,6 +187,8 @@ INDUCTOR_INFERENCE_NOT_YET_WORKING = {
     *AOT_AUTOGRAD_NOT_YET_WORKING,
     # https://github.com/pytorch/torchdynamo/issues/838
     "hf_Reformer",
+    # RuntimeError: expected scalar type Half but found Float
+    "hf_DistilBert",
 }
 
 INDUCTOR_TRAINING_NOT_YET_WORKING = {

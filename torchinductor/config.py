@@ -1,3 +1,7 @@
+import os
+
+import torchinductor
+
 # add some debug printouts
 debug = False
 
@@ -105,7 +109,13 @@ class triton:
 
 # create a directory containing lots of debug information
 class trace:
-    enabled = False  # master switch for all debugging flags
-    info_log = True
+    # master switch for all debugging flags
+    enabled = os.environ.get("TORCHINDUCTOR_TRACE", "0") == "1"
+
     debug_log = True
+    info_log = False
     fx_graph = True
+    ir_pre_fusion = True
+    ir_post_fusion = True
+    graph_diagram = True
+    output_code = True

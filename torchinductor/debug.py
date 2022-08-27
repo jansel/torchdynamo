@@ -4,12 +4,15 @@ import functools
 import itertools
 import logging
 import os.path
+import shutil
+import subprocess
 from typing import Any
 from typing import List
 
 import torch
 from torch import fx as fx
 
+import torchinductor.scheduler
 from torchdynamo.debug_utils import save_graph_repro
 from torchdynamo.debug_utils import wrap_debug
 from torchdynamo.utils import init_logging
@@ -29,7 +32,16 @@ from .virtualized import V
 log = logging.getLogger(__name__)
 
 
-def draw_buffers(nodes, print_graph=False):
+@functools.lru_cache(None)
+def has_dot():
+    try:
+        subprocess.check_output(["which", "dot"], stderr=subprocess.PIPE)
+        return True
+    except subprocess.SubprocessError:
+        return False
+
+
+def draw_buffers(nodes, print_graph=False, fname=None):
     """
     Draw a graph in fname.svg.
     nodes is a list of SchedulerNode objects.
@@ -41,7 +53,13 @@ def draw_buffers(nodes, print_graph=False):
     from torch.fx.passes.shape_prop import TensorMetadata
     from torch.fx.passes.tools_common import legalize_graph
 
-    fname = get_graph_being_compiled()
+    if not has_dot():
+        log.warning("graph_diagram requires `graphviz` package installed")
+        return
+
+    if fname is None:
+        fname = get_graph_being_compiled()
+
     graph = create_fx_from_snodes(nodes)
 
     for node in graph.nodes:
@@ -61,11 +79,10 @@ def draw_buffers(nodes, print_graph=False):
 
     if print_graph:
         print(graph)
-    print("starting creating module")
+
     gm = GraphModule({}, graph)
     legalize_graph(gm)
     gm.graph.lint()
-    print("starting drawing")
     draw_graph(gm, fname, clear_meta=False)
 
 
@@ -178,6 +195,17 @@ class DebugContext:
         self._path = None
         self._stack = contextlib.ExitStack()
 
+    def rename(self, new_path: str):
+        assert new_path.endswith(".debug"), new_path
+        if os.path.exists(new_path):
+            shutil.rmtree(new_path)
+        try:
+            os.rename(self._path, new_path)
+            self._path = new_path
+        except OSError:
+            # other OS might have troubling renaming dir with open files
+            pass
+
     def fopen(self, filename):
         assert self._path
         return open(os.path.join(self._path, filename), "w")
@@ -233,11 +261,36 @@ class DebugContext:
             return ignored
 
 
+SchedulerNodeList = List["torchinductor.scheduler.BaseSchedulerNode"]
+
+
 class DebugFormatter:
     def __init__(self, handler):
         self.fopen = handler.fopen
+        self._path = handler._path
         self.handler = handler
 
-    def fx_graph(self, gm, inputs):
+    def filename(self, suffix):
+        return os.path.join(self.handler._path, suffix)
+
+    def fx_graph(self, gm: torch.fx.GraphModule, inputs: List[torch.Tensor]):
         with self.fopen("fx_graph.py") as fd:
             save_graph_repro(fd, gm, inputs, "inductor")
+
+    def ir_pre_fusion(self, nodes: SchedulerNodeList):
+        self._write_ir("ir_pre_fusion.txt", nodes)
+
+    def ir_post_fusion(self, nodes: SchedulerNodeList):
+        self._write_ir("ir_post_fusion.txt", nodes)
+
+    def _write_ir(self, filename: str, nodes: SchedulerNodeList):
+        with self.fopen(filename) as fd:
+            for node in nodes:
+                fd.write(node.debug_str())
+                fd.write("\n\n\n")
+
+    def graph_diagram(self, nodes: SchedulerNodeList):
+        draw_buffers(nodes, fname=self.filename("graph_diagram.svg"))
+
+    def output_code(self, filename):
+        shutil.copy(filename, self.filename("output_code.py"))

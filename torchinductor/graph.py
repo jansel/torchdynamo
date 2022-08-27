@@ -1,5 +1,6 @@
 import logging
 import operator
+import os
 from itertools import chain
 
 import sympy
@@ -23,6 +24,7 @@ from .lowering import lowerings
 from .lowering import make_fallback
 from .lowering import needs_realized_inputs
 from .sizevars import SizeVarAllocator
+from .virtualized import V
 
 log = logging.getLogger(__name__)
 
@@ -307,8 +309,9 @@ class GraphLowering(torch.fx.Interpreter):
             print(code)
 
         mod = PyCodeCache.load(code)
-
         for name, value in self.constants.items():
             setattr(mod, name, value)
 
+        V.debug.output_code(mod.__file__)
+        V.debug.rename(os.path.splitext(mod.__file__)[0] + ".debug")
         return mod.call

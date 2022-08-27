@@ -301,7 +301,7 @@ class GraphLowering(torch.fx.Interpreter):
         self.scheduler.codegen()
         return self.wrapper_code.generate()
 
-    def compile_to_fn(self):
+    def compile_to_module(self):
         from .codecache import PyCodeCache
 
         code = self.codegen()
@@ -312,6 +312,10 @@ class GraphLowering(torch.fx.Interpreter):
         for name, value in self.constants.items():
             setattr(mod, name, value)
 
+        log.info("Output code: %s", mod.__file__)
         V.debug.output_code(mod.__file__)
         V.debug.rename(os.path.splitext(mod.__file__)[0] + ".debug")
-        return mod.call
+        return mod
+
+    def compile_to_fn(self):
+        return self.compile_to_module().call

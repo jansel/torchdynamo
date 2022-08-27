@@ -33,9 +33,9 @@ log = logging.getLogger(__name__)
 
 
 def pformat(obj):
-    result = pprint.pformat(obj, indent=2)
+    result = pprint.pformat(obj, indent=4)
     if "\n" in result:
-        return f"\n{textwrap.indent(result, '    ')}"
+        return f"\n{textwrap.indent(result, ' '*4)}"
     return result
 
 

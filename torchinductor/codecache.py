@@ -160,7 +160,6 @@ class PyCodeCache:
                 exec(code, mod.__dict__, mod.__dict__)
                 cls.cache[key] = mod
                 cls.cache[key].key = key
-        log.debug(f"PyCodeCache {path}")
         return cls.cache[key]
 
 

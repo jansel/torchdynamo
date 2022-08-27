@@ -1479,6 +1479,9 @@ def main(runner, original_dir=None):
     # defaults
     args.filter = args.filter or [r"."]
     args.exclude = args.exclude or [r"^$"]
+    args.inductor_settings = (
+        args.inductor or args.inductor_dynamic or args.inductor_settings
+    )
 
     if args.ci:
         # Only dump error on CI
@@ -1532,6 +1535,8 @@ def main(runner, original_dir=None):
         )
         if args.training:
             runner.skip_models.add("hf_T5")
+        if args.inductor_settings:
+            runner.skip_models.update({"dhen_5x_dense_over"})
 
     if torchdynamo.config.dynamic_shapes:
         # TODO(jansel): fix bugs in these
@@ -1567,7 +1572,7 @@ def main(runner, original_dir=None):
     if args.devices == ["cpu"]:
         runner.skip_models.update(runner.very_slow_models)
 
-    if args.inductor or args.inductor_dynamic or args.inductor_settings:
+    if args.inductor_settings:
         runner.skip_models.update(runner.failing_torchinductor_models)
         if args.float16:
             # TODO(jansel): check if correctness issue is real
@@ -1796,7 +1801,7 @@ def main(runner, original_dir=None):
                     args.dynamic_shapes,
                 )
             except NotImplementedError:
-                log.warning(f"{args.only} failed to load", exc_info=True)
+                log.warning(f"{args.only} failed to load", exc_info=False)
                 continue  # bad benchmark implementation
 
             current_name = name

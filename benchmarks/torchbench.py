@@ -166,32 +166,31 @@ AOT_AUTOGRAD_NOT_YET_WORKING = {
     "moco",
     # https://github.com/pytorch/pytorch/issues/81529
     "speech_transformer",
+    # https://github.com/pytorch/torchdynamo/issues/837
+    "fastNLP_Bert",
+    # https://github.com/pytorch/torchdynamo/issues/1066
+    "detectron2_fasterrcnn_r_101_c4",
+    "detectron2_fasterrcnn_r_101_dc5",
+    "detectron2_fasterrcnn_r_101_fpn",
+    "detectron2_fasterrcnn_r_50_c4",
+    "detectron2_fasterrcnn_r_50_dc5",
+    "detectron2_fasterrcnn_r_50_fpn",
+    "detectron2_fcos_r_50_fpn",
+    "detectron2_maskrcnn_r_101_c4",
+    "detectron2_maskrcnn_r_101_fpn",
+    "detectron2_maskrcnn_r_50_c4",
+    "detectron2_maskrcnn_r_50_fpn",
 }
 
 # https://github.com/pytorch/torchdynamo/issues/332
 INDUCTOR_INFERENCE_NOT_YET_WORKING = {
     *AOT_AUTOGRAD_NOT_YET_WORKING,
-    # RuntimeError: The tensor has a non-zero number of elements,
-    "fastNLP_Bert",
-    # Accuracy errors
-    "hf_Longformer",
+    # https://github.com/pytorch/torchdynamo/issues/838
     "hf_Reformer",
-    "maml",
 }
 
 INDUCTOR_TRAINING_NOT_YET_WORKING = {
     *INDUCTOR_INFERENCE_NOT_YET_WORKING,
-    # load_mask nesting needed
-    "Super_SloMo",
-    # float16 issue or CUDA error: operation not permitted when stream is capturing
-    "resnet50_quantized_qat",
-    "mobilenet_v2_quantized_qat",
-    # TypeError: expected Tensor as element 0 in argument 1, but got NoneType
-    "dlrm",
-    # RuntimeError: CUDA out of memory.
-    "Background_Matting",
-    "dhen_5x_over",
-    "dhen_5x_dense_over",
 }
 
 TRT_NOT_YET_WORKING = {

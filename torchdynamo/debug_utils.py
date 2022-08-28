@@ -19,8 +19,11 @@ def minifier_dir():
     return f"/tmp/minifier_{getpass.getuser()}"
 
 
-@functools.lru_cache(None)
+@functools.lru_cache(None)  # subprocess is expensive
 def _cuda_system_info_comment():
+    if not torch.cuda.is_available():
+        return "# torch.cuda.is_available()==False, no GPU info collected\n"
+
     model_str = "# CUDA Info: \n"
     cuda_version_out = subprocess.run(["nvcc", "--version"], stdout=subprocess.PIPE)
     cuda_version_lines = cuda_version_out.stdout.decode().split("\n")
@@ -58,10 +61,7 @@ def generate_repro_string(gm, args):
     model_str += f"# torch version: {torch.version.__version__}\n"
     model_str += f"# torch cuda version: {torch.version.cuda}\n"
     model_str += f"# torch git version: {torch.version.git_version}\n\n\n"
-    if torch.cuda.is_available():
-        model_str += _cuda_system_info_comment()
-    else:
-        model_str += "# torch.cuda.is_available()==False, no GPU info collected\n"
+    model_str += _cuda_system_info_comment()
 
     model_str += "class Repro(torch.nn.Module):\n"
     attrs = dir(gm)

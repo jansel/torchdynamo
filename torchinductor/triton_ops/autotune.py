@@ -1,4 +1,6 @@
 import logging
+import textwrap
+from typing import List
 
 import triton
 from triton import Config
@@ -18,23 +20,36 @@ from .conv_perf_model import estimate_conv_time
 log = logging.getLogger(__name__)
 
 
-class Autotuner(triton.code_gen.Autotuner):
+def autotune(
+    configs: List[Config],
+    key: List[str],
+    prune_configs_by=None,
+    reset_to_zero=None,
+    debug_label=None,
+):
     """
-    Customized triton autotuner
+    A copy of triton.autotune that calls our subclass.  Our subclass
+    has additional debugging and error handling.
     """
+    configs = unique_configs(configs)
+    results = []
 
-    def _bench(self, *args, config, **kwargs):
-        try:
-            return super()._bench(*args, config=config, **kwargs)
-        except triton.code_gen.OutOfResources as e:
-            log.warning("OutOfResources: %s %s", e, config)
-            return (float("inf"), float("inf"), float("inf"))
-
-
-def autotune(configs, key, prune_configs_by=None, reset_to_zero=None):
-    """
-    A copy of triton.autotune that calls our subclass above
-    """
+    class Autotuner(triton.code_gen.Autotuner):
+        def _bench(self, *args, config, **kwargs):
+            try:
+                result = super()._bench(*args, config=config, **kwargs)
+                if debug_label:
+                    results.append(f"{config}: {result[0]}")
+                    if len(results) == len(configs):
+                        log.warning(
+                            "Autouning Results %s\n%s",
+                            debug_label,
+                            textwrap.indent("\n".join(results), " " * 4),
+                        )
+                return result
+            except triton.code_gen.OutOfResources as e:
+                log.warning("OutOfResources: %s %s", e, config)
+                return (float("inf"), float("inf"), float("inf"))
 
     def decorator(fn):
         def wrapper(kernel):
@@ -48,7 +63,19 @@ def autotune(configs, key, prune_configs_by=None, reset_to_zero=None):
     return decorator
 
 
-def triton_config(size_hints, x, y=None, z=None, num_stages=1):
+def unique_configs(configs: List[Config]):
+    """Remove duplicate configurations"""
+    seen = set()
+    pruned_configs = []
+    for config in configs:
+        key = tuple(config.kwargs.items())
+        if key not in seen:
+            seen.add(key)
+            pruned_configs.append(config)
+    return pruned_configs
+
+
+def triton_config(size_hints, x, y=None, z=None, num_stages=1) -> Config:
     """
     Construct a pointwise triton config with some adjustment heuristics
     based on size_hints. Size_hints is a tuple of numels in each tile
@@ -100,7 +127,7 @@ def triton_config(size_hints, x, y=None, z=None, num_stages=1):
     return Config(cfg, num_warps=num_warps, num_stages=num_stages)
 
 
-def triton_config_reduction(size_hints, x, r, num_stages=2):
+def triton_config_reduction(size_hints, x, r, num_stages=2) -> Config:
     """
     Construct a reduction triton config with some adjustment heuristics
     based on size_hints. Size_hints is a tuple of numels in each tile
@@ -159,21 +186,14 @@ def apply_triton_config(config):
     """
     Decorator that applies a fixed triton config using triton.heuristics.
     """
-
-    def getter(name):
-        def get(args):
-            return config.kwargs[name]
-
-        return get
-
-    return heuristics({name: getter(name) for name in config.kwargs.keys()})
+    # Autotuner with 1-config is no-op
+    return autotune([config], ["xnumel"])
 
 
 def pointwise_heuristics(size_hints, contiguous=False):
     """
     Construct @triton.heuristics() based on size_hints.
     """
-
     if len(size_hints) == 1:
         return apply_triton_config(triton_config(size_hints, 1024))
     if len(size_hints) == 2:
@@ -209,12 +229,13 @@ def pointwise_heuristics(size_hints, contiguous=False):
 
 def reduction_heuristics(size_hints, contiguous=False):
     """args to @triton.heuristics()"""
-
+    rnumel = size_hints[-1]
     if len(size_hints) == 2:
+        contiguous_config = triton_config_reduction(
+            size_hints, 1, (rnumel if 256 <= rnumel < 2048 else 2048), num_stages=1
+        )
         if contiguous:
-            return apply_triton_config(
-                triton_config_reduction(size_hints, 1, 2048, num_stages=1)
-            )
+            return apply_triton_config(contiguous_config)
         if not config.triton.autotune:
             return apply_triton_config(triton_config_reduction(size_hints, 32, 128))
         return autotune(
@@ -226,7 +247,7 @@ def reduction_heuristics(size_hints, contiguous=False):
                 triton_config_reduction(
                     size_hints, 8, 512
                 ),  # this and the next one seem very similar but both are needed for perf
-                triton_config_reduction(size_hints, 1, 2048, num_stages=1),
+                contiguous_config,
             ],
             key=["xnumel", "rnumel"],
         )

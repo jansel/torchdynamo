@@ -169,7 +169,7 @@ def apply_triton_config(config):
     return heuristics({name: getter(name) for name in config.kwargs.keys()})
 
 
-def pointwise_heuristics(size_hints):
+def pointwise_heuristics(size_hints, contiguous=False):
     """
     Construct @triton.heuristics() based on size_hints.
     """
@@ -207,17 +207,19 @@ def pointwise_heuristics(size_hints):
     raise NotImplementedError(f"size_hints: {size_hints}")
 
 
-def reduction_heuristics(size_hints):
+def reduction_heuristics(size_hints, contiguous=False):
     """args to @triton.heuristics()"""
 
     if len(size_hints) == 2:
+        if contiguous:
+            return apply_triton_config(
+                triton_config_reduction(size_hints, 1, 2048, num_stages=1)
+            )
         if not config.triton.autotune:
             return apply_triton_config(triton_config_reduction(size_hints, 32, 128))
         return autotune(
             [
                 triton_config_reduction(size_hints, 64, 64),
-                #                triton_config_reduction(size_hints, 16, 64),
-                #                triton_config_reduction(size_hints, 32, 128),
                 triton_config_reduction(
                     size_hints, 128, 8
                 ),  # this one is the best for outer reduction

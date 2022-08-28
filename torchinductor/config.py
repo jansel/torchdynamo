@@ -92,9 +92,6 @@ class triton:
     # limit tiling dimensions
     max_tiles = 2
 
-    # put each kernel in its own file
-    many_files = False
-
     # use triton.autotune?
     autotune = True
 
@@ -132,4 +129,4 @@ class trace:
     graph_diagram = False
 
     # Store cProfile (see snakeviz to view)
-    compile_profile = False
+    compile_profile = True

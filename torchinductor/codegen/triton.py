@@ -895,7 +895,7 @@ class TritonKernel(Kernel):
 
         code.splice(
             f"""
-                @{heuristics}(size_hints={size_hints!r}, contiguous={self.is_contiguous!r})
+                @{heuristics}(size_hints={size_hints!r}, contiguous={self.is_contiguous!r}, filename=__file__)
                 @triton.jit
             """
         )

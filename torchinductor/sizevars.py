@@ -383,7 +383,7 @@ class SizeVarAllocator(object):
 
 def join_dimensions(expr: Expr) -> Expr:
     if not isinstance(expr, sympy.Add) or "ModularIndexing" not in str(expr):
-        return expr  # fast exist path
+        return expr  # fast exit path
     return _join_dimensions_cached(expr)
 
 

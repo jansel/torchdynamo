@@ -129,4 +129,4 @@ class trace:
     graph_diagram = False
 
     # Store cProfile (see snakeviz to view)
-    compile_profile = True
+    compile_profile = False

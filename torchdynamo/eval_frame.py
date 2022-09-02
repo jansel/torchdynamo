@@ -11,8 +11,10 @@ from unittest.mock import patch
 
 import torch
 import torch.utils._pytree as pytree
+from torch.fx.experimental.proxy_tensor import make_fx
 
 import torchdynamo
+from torchdynamo.debug_utils import wrap_backend_debug
 from torchdynamo.utils import checkpoint_params
 from torchdynamo.utils import clone_inputs
 from torchdynamo.utils import compile_times
@@ -46,7 +48,7 @@ set_guard_error_hook = _eval_frame.set_guard_error_hook
 always_optimize_code_objects = utils.ExactWeakKeyDictionary()
 null_context = contextlib.nullcontext
 unset = object()
-compile_lock = threading.Lock()
+compile_lock = threading.RLock()
 most_recent_backend = None
 
 
@@ -167,7 +169,7 @@ class _TorchDynamoContext:
         # of decorators.
         _fn._torchdynamo_orig_callable = fn
 
-        # If the function is called with torchdynamo.optimize decorator, we
+        # If the function is called using torchdynamo.optimize decorator, we
         # should prevent any type of skipping.
         if callback not in (None, False):
             always_optimize_code_objects[fn.__code__] = True
@@ -279,6 +281,7 @@ class WrapperBackend:
 
 def get_compiler_fn(compiler_fn):
     """Expand backend strings to functions"""
+    compiler_str = compiler_fn if isinstance(compiler_fn, str) else None
     if compiler_fn == "inductor":
         from torchinductor.compile_fx import compile_fx
 
@@ -288,7 +291,7 @@ def get_compiler_fn(compiler_fn):
 
         compiler_fn = BACKENDS[compiler_fn]
 
-    return compiler_fn
+    return wrap_backend_debug(compiler_fn, compiler_str)
 
 
 class _NullDecorator(contextlib.nullcontext):
@@ -396,7 +399,7 @@ def explain(f, *args, **kwargs):
     return explanation, out_guards, graphs, ops_per_graph
 
 
-def export(f, *args, **kwargs):
+def export(f, *args, aten_graph=False, **kwargs):
     f = innermost_fn(f)
 
     graph = None
@@ -502,6 +505,9 @@ def export(f, *args, **kwargs):
             new_result = pytree.tree_unflatten(new_result_flat, out_spec_traced)
 
             return super().output(target, (new_result,), {})
+
+    if aten_graph:
+        graph = make_fx(graph)(*graph_captured_input)
 
     new_graph = ChangeInputOutputSignature(
         graph,

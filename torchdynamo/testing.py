@@ -51,6 +51,14 @@ def collect_results(model, prediction, loss, example_inputs):
     return results
 
 
+def requires_bwd_pass(out):
+    if isinstance(out, torch.Tensor):
+        return out.requires_grad
+    elif isinstance(out, (list, tuple)):
+        return any([requires_bwd_pass(x) for x in out])
+    raise NotImplementedError("Don't know how to reduce", type(out))
+
+
 def reduce_to_scalar_loss(out):
     """Reduce the output of a model to get scalar loss"""
     if isinstance(out, torch.Tensor):
@@ -159,11 +167,11 @@ def standard_test(self, fn, nargs, expected_ops=None, expected_ops_dynamic=None)
     correct1 = fn(*args1)
     correct2 = fn(*args2)
     torchdynamo.reset()
-    with torchdynamo.optimize_assert(actual):
-        val1a = fn(*args1)
-        val2a = fn(*args2)
-        val1b = fn(*args1)
-        val2b = fn(*args2)
+    opt_fn = torchdynamo.optimize_assert(actual)(fn)
+    val1a = opt_fn(*args1)
+    val2a = opt_fn(*args2)
+    val1b = opt_fn(*args1)
+    val2b = opt_fn(*args2)
     torchdynamo.reset()
     self.assertTrue(same(val1a, correct1))
     self.assertTrue(same(val1b, correct1))

@@ -1051,7 +1051,7 @@ class BenchmarkRunner:
                 batch_size=batch_size,
             )
         except NotImplementedError:
-            logging.warn(f"{model_name} failed to load")
+            log.warning(f"{model_name} failed to load", exc_info=True)
 
         assert (
             device == "cuda"

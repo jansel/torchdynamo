@@ -56,6 +56,7 @@ output_filename = None
 
 CI_SKIP_INFERENCE = [
     # TorchBench
+    "detectron2",
     "dlrm",
     "fambench_dlrm",
     "fastNLP_Bert",
@@ -104,13 +105,14 @@ CI_SKIP_TRAINING = [
     "hf_GPT2",
     "mobilenet_",
     "pytorch_struct",
+    "timm_regnet",
     "vgg16",
     "Background_Matting",  # from functionalization
-    "mobilenet_v2_quantized_qat",  # from functionalization
-    "resnet50_quantized_qat",  # from functionalization
     "speech_transformer",  # from functionalization
     "vision_maskrcnn",  # from functionalization
     "timm_efficientnet",  # from functionalization (only fails for inductor)
+    # OOM
+    "resnet50_quantized_qat",
     # Huggingface
     "AlbertForMaskedLM",
     "BartForConditionalGeneration",
@@ -793,7 +795,7 @@ def read_batch_size_from_file(args, filename, model_name):
             if model_name == cur_name:
                 batch_size = int(b)
     if batch_size is None:
-        warnings.warn("Could not find batch size for {}".format(model_name))
+        log.warning("Could not find batch size for {}".format(model_name))
     elif batch_size == -1:
         raise RuntimeError(
             f"Batch size is unset for {model_name} in {args.batch_size_file}"
@@ -1233,7 +1235,7 @@ class BenchmarkRunner:
                 optimized_model_iter_fn = optimize_ctx(model_iter_fn)
                 new_result = optimized_model_iter_fn(model, example_inputs)
             except Exception as e:
-                logging.exception("unhandled error")
+                log.exception("unhandled error")
                 print("ERROR")
                 print(e)
                 return sys.exit(-1)

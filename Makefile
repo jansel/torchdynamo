@@ -88,7 +88,6 @@ pull-deps:
 	(cd ../torchtext      && git pull && git submodule update --init --recursive)
 	(cd ../torchaudio     && git pull && git submodule update --init --recursive)
 	(cd ../detectron2     && git pull && git submodule update --init --recursive)
-	(cd ../torchbenchmark && git pull && git submodule update --init --recursive)
 	(cd ../triton         && git pull && git submodule update --init --recursive)
 
 build-deps: clone-deps

@@ -318,7 +318,7 @@ def reduction_heuristics(size_hints, reduction_hint=False, filename=None):
     rnumel = size_hints[-1]
     if len(size_hints) == 2:
         contiguous_config = triton_config_reduction(
-            size_hints, 1, (rnumel if 256 <= rnumel < 2048 else 2048), num_stages=1
+            size_hints, 1, (rnumel if 256 <= rnumel < 8192 else 8192), num_stages=1
         )
         if reduction_hint == ReductionHint.INNER:
             return apply_triton_config(contiguous_config)

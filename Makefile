@@ -106,8 +106,9 @@ build-deps: clone-deps
 	(cd ../torchaudio  && python setup.py clean && python setup.py develop)
 	(cd ../detectron2  && python setup.py clean && python setup.py develop)
 	(cd ../pytorch/functorch   && python setup.py clean && python setup.py develop)
-	(cd ../torchbenchmark && python install.py --continue_on_fail)
 	(cd ../triton/python && python setup.py clean && python setup.py develop)
+	(cd ../torchbenchmark && python install.py --continue_on_fail)
+	pip install gym==0.25.2
 	make setup_lint
 	python setup.py develop
 

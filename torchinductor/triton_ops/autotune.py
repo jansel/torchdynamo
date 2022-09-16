@@ -24,8 +24,13 @@ from .conv_perf_model import estimate_conv_time
 
 log = logging.getLogger(__name__)
 
+try:
+    from triton.runtime.autotuner import Autotuner
+except ModuleNotFoundError:
+    assert False
 
-class CachingAutotuner(triton.code_gen.Autotuner):
+
+class CachingAutotuner(Autotuner):
     """
     Simplified version of Triton autotuner that has no invalidation key
     and caches the best config to disk.
@@ -36,36 +41,38 @@ class CachingAutotuner(triton.code_gen.Autotuner):
         assert not self.early_config_prune
         assert not self.perf_model
         self.save_cache_hook = save_cache_hook
-
-    def _bench(self, *args, config, **kwargs):
-        try:
-            return super()._bench(*args, config=config, **kwargs)
-        except triton.code_gen.OutOfResources as e:
-            log.warning("OutOfResources: %s %s", e, config)
-            return (float("inf"), float("inf"), float("inf"))
+        self.kernel = kernel
 
     def __call__(self, *args, **kwargs):
-        if len(self.configs) > 1:
-            bench_start = time.time()
-            timings = {
-                config: self._bench(*args, config=config, **kwargs)
-                for config in self.configs
-            }
-            self.bench_time = time.time() - bench_start
-            self.configs = [builtins.min(timings, key=timings.get)]
-            if self.save_cache_hook:
-                self.save_cache_hook(self.configs[0])
+        raise NotImplementedError()
 
-        config = self.configs[0]
-        if config.pre_hook is not None:
-            config.pre_hook(dict(zip(self.arg_names, args)))
-        return self.kernel(
-            *args,
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
-            **kwargs,
-            **config.kwargs,
-        )
+    def __getitem__(self, grid):
+        def call(*args, **kwargs):
+            if len(self.configs) > 1:
+                bench_start = time.time()
+                self.run = self.kernel[grid]
+                timings = {
+                    config: self._bench(*args, config=config, **kwargs)
+                    for config in self.configs
+                }
+                self.bench_time = time.time() - bench_start
+                self.configs = [builtins.min(timings, key=timings.get)]
+                if self.save_cache_hook:
+                    self.save_cache_hook(self.configs[0])
+
+            config = self.configs[0]
+            if config.pre_hook is not None:
+                config.pre_hook(dict(zip(self.arg_names, args)))
+
+            return self.kernel[grid](
+                *args,
+                num_warps=config.num_warps,
+                num_stages=config.num_stages,
+                **kwargs,
+                **config.kwargs,
+            )
+
+        return call
 
 
 def hash_configs(configs: List[Config]):
@@ -132,13 +139,9 @@ def cached_autotune(
         save_cache_hook = None
 
     def decorator(fn):
-        def wrapper(kernel):
-            return CachingAutotuner(
-                kernel, fn.arg_names, configs, save_cache_hook=save_cache_hook
-            )
-
-        fn.kernel_decorators.append(wrapper)
-        return fn
+        return CachingAutotuner(
+            fn, fn.arg_names, configs, save_cache_hook=save_cache_hook
+        )
 
     return decorator
 

@@ -420,6 +420,15 @@ class CommonTemplate:
 
         self.common(fn, (torch.randn(32),))
 
+    def test_add_inplace_permuted(self):
+        def fn(x, y):
+            return x.add_(y)
+
+        x = torch.ones([2, 12, 13, 17]).transpose(1, 2)
+        y = torch.randn([2, 13, 1, 17])
+
+        self.common(fn, (x, y))
+
     def test_abs(self):
         def fn(a):
             return (a / (torch.abs(a) + 1),)
@@ -2807,6 +2816,31 @@ class CommonTemplate:
             ],
         )
 
+    # From https://github.com/pytorch/torchdynamo/issues/1200
+    def test_max_pool2d_with_indices_backward3(self):
+        def fn(a, b, c):
+            return aten.max_pool2d_with_indices_backward(
+                a, b, [1, 1], [2, 2], [0, 0], [1, 1], False, c
+            )
+
+        x = torch.randn([32, 256, 37, 38])
+        result, indices = aten.max_pool2d_with_indices(
+            x,
+            [1, 1],
+            [2, 2],
+            0,
+            1,
+            False,
+        )
+        self.common(
+            fn,
+            [
+                torch.randn_like(result),
+                x,
+                indices,
+            ],
+        )
+
     def test_avg_pool2d_backward(self):
         def fn(a, b):
             return aten.avg_pool2d_backward(
@@ -2846,6 +2880,27 @@ class CommonTemplate:
             [
                 torch.randn([1, 1, 20, 15]),
                 torch.randn([1, 1, 20, 15]),
+            ],
+        )
+
+    def test_avg_pool2d_backward3(self):
+        def fn(a, b):
+            return aten.avg_pool2d_backward(
+                a,
+                b,
+                [1, 1],
+                [2, 2],
+                [0, 0],
+                False,
+                False,
+                None,
+            )
+
+        self.common(
+            fn,
+            [
+                torch.randn([1, 2016, 11, 11]),
+                torch.randn([1, 2016, 21, 21]),
             ],
         )
 

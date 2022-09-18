@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import threading
+import traceback
 import types
 import warnings
 from unittest.mock import patch
@@ -12,9 +13,11 @@ from unittest.mock import patch
 import torch
 import torch.utils._pytree as pytree
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.nn.parallel.distributed import DistributedDataParallel
 
 import torchdynamo
 from torchdynamo.debug_utils import wrap_backend_debug
+from torchdynamo.optimizations.distributed import DDPOptimizer
 from torchdynamo.utils import checkpoint_params
 from torchdynamo.utils import clone_inputs
 from torchdynamo.utils import compile_times
@@ -103,15 +106,12 @@ class _TorchDynamoContext:
         patch_fn()
 
     def __enter__(self):
-        log.warning(
-            (
-                "Using TorchDynamo with a context manager will be deprecated soon."
-                "Please read https://github.com/pytorch/torchdynamo#usage-example "
-                "to use TorchDynamo using an annotation."
-            )
-        )
         if config.raise_on_ctx_manager_usage:
-            raise RuntimeError("TorchDynamo is used with a context manager")
+            raise RuntimeError(
+                "torchdynamo.optimize(...) is used with a context manager. "
+                "Please refer to https://github.com/pytorch/torchdynamo#usage-example "
+                "to use torchdynamo.optimize(...) as an annotation/decorator. "
+            )
         self.on_enter()
         self.prior = set_eval_frame(self.callback)
         self.backend_ctx = self.extra_ctx_ctor()
@@ -230,6 +230,20 @@ def catch_errors_wrapper(callback):
             ):
                 # nametuple constructor
                 return None
+            if config.optimize_ddp:
+                ddp_module = DistributedDataParallel._get_active_ddp_module()
+                if ddp_module and frame.f_code.co_name == "forward":
+                    with compile_lock:
+                        ddp_optimizer = DDPOptimizer(
+                            bucket_bytes_cap=ddp_module.bucket_bytes_cap,
+                            parameters_to_ignore=ddp_module.parameters_to_ignore,
+                            backend_compile_fn=callback._torchdynamo_orig_callable,
+                        )
+                        hijacked_callback = convert_frame.convert_frame(
+                            ddp_optimizer.compile_fn, guard_export_fn=None
+                        )
+                        return hijacked_callback(frame, cache_size)
+
             with compile_lock:
                 return callback(frame, cache_size)
         except Exception:
@@ -393,9 +407,18 @@ def explain(f, *args, **kwargs):
 
     graph_count = len(graphs)
 
+    # For the explanation summary, dedupe reasons by the innermost stack frame and dedupe by it.
+    deduped_reasons = {}
+    for reason in break_reasons:
+        innermost_frame = reason.user_stack[-1]
+        # __repr__ uniquely identifies a FrameSummary so we can use it for deduping
+        deduped_reasons[repr(innermost_frame)] = reason
+
     formatted_list = ""
-    for idx in range(0, len(break_reasons)):
-        formatted_list += f"{idx + 1}. {break_reasons[idx]} \n"
+    for idx, break_reason in enumerate(deduped_reasons.values()):
+        formatted_stack = "".join(traceback.format_list(break_reason.user_stack))
+        msg = f"{break_reason.reason}\n{formatted_stack}"
+        formatted_list += f"{idx + 1}. {msg} \n"
 
     explanation = f"Dynamo produced {graph_count} graphs"
     explanation += f"with {graph_count - 1} graph break and {op_count} ops"
@@ -405,7 +428,7 @@ def explain(f, *args, **kwargs):
 
     # TODO(voz): Do we want a decorator for this?
     torchdynamo.reset()
-    return explanation, out_guards, graphs, ops_per_graph
+    return explanation, out_guards, graphs, ops_per_graph, break_reasons
 
 
 def export(f, *args, aten_graph=False, **kwargs):
@@ -605,6 +628,12 @@ class TorchPatcher:
             for opt in torch.optim.__dict__.values()
             if inspect.isclass(opt) and issubclass(opt, torch.optim.Optimizer)
         ]
+
+        # disable dynamo for the wrapper that helps give dynamo hints about entering DDP
+        if hasattr(DistributedDataParallel, "_inside_ddp_forward"):
+            DistributedDataParallel._inside_ddp_forward = skip(
+                DistributedDataParallel._inside_ddp_forward
+            )
 
         # disable profile hook
         for opt in optimizers:

@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import dis
 import enum
+import logging
 import math
 import os
 import sys
@@ -2329,6 +2330,53 @@ class MiscTests(torchdynamo.testing.TestCase):
 
             f3(torch.ones(6))
         self.assertEqual(cnt.frame_count, 0)
+
+    def test_config_log_level(self):
+        @torchdynamo.optimize("eager")
+        def fn(a, b):
+            return a + b
+
+        with self.assertLogs(logger="torchdynamo", level=logging.DEBUG) as log:
+            torchdynamo.config.log_level = logging.DEBUG
+            fn(torch.randn(10), torch.randn(10))
+            cur_len = len(log)
+            self.assertGreater(cur_len, 0)
+
+            torchdynamo.config.log_level = logging.WARNING
+            fn(torch.randn(10), torch.randn(10))
+            self.assertEqual(cur_len, len(log))
+
+    def test_duplicate_graph_break_warning(self):
+        @torchdynamo.optimize("eager")
+        def f1(a, b):
+            f2(a, b)
+
+        def f2(a, b):
+            c = a + b
+            print("break")
+            return a + b + c
+
+        @torchdynamo.optimize("eager")
+        def g1(a, b):
+            g2(a, b)
+
+        def g2(a, b):
+            c = a + b
+            print("break")
+            return a + b + c
+
+        def count_graph_break_msgs(msgs):
+            return sum(msg.find("Graph break") != -1 for msg in msgs)
+
+        with self.assertLogs(logger="torchdynamo", level=logging.WARNING) as log:
+            torchdynamo.config.verbose = True
+            f1(torch.randn(10), torch.randn(10))
+            self.assertGreater(count_graph_break_msgs(log.output), 1)
+
+        with self.assertLogs(logger="torchdynamo", level=logging.WARNING) as log:
+            torchdynamo.config.verbose = False
+            g1(torch.randn(10), torch.randn(10))
+            self.assertEqual(count_graph_break_msgs(log.output), 1)
 
 
 class TestTracer(JitTestCase):

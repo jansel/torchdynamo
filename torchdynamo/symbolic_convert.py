@@ -32,7 +32,8 @@ from torchdynamo.variables.builder import VariableBuilder
 from . import exc
 from . import skipfiles
 from .allowed_functions import is_allowed
-from .allowed_functions import is_builtin
+from .allowed_functions import is_builtin_callable
+from .allowed_functions import is_builtin_constant
 from .bytecode_analysis import livevars_analysis
 from .bytecode_transformation import Instruction
 from .bytecode_transformation import cleaned_instructions
@@ -43,11 +44,13 @@ from .codegen import PyCodegen
 from .exc import Unsupported
 from .exc import unimplemented
 from .guards import GuardBuilder
+from .output_graph import GraphCompileReason
 from .output_graph import OutputGraph
 from .resume_execution import ContinueExecutionCache
 from .resume_execution import ReenterWith
 from .utils import counters
 from .utils import fake_tensors_available
+from .utils import graph_break_dup_warning_checker
 from .utils import istype
 from .variables.base import MutableLocal
 from .variables.base import VariableTracker
@@ -117,7 +120,12 @@ def generic_jump(truth_fn: typing.Callable, push: bool):
         elif isinstance(value, TensorVariable) and self.should_compile_partial_graph():
             # compile a partial subgraph prefix then jump into user code
             self.push(value)
-            self.output.compile_subgraph(self, msg="generic_jump")
+            self.output.compile_subgraph(
+                self,
+                reason=GraphCompileReason(
+                    f"generic_jump {typestr(value)}", [self.frame_summary()]
+                ),
+            )
             self.pop()
 
             if_next = self.create_call_resume_at(self.next_instruction)
@@ -149,28 +157,27 @@ def break_graph_if_unsupported(*, push):
         @functools.wraps(inner_fn)
         def wrapper(self: "InstructionTranslatorBase", inst: Instruction):
             state = self.copy_graphstate()
-            msg = None
+            reason = None
             try:
                 return inner_fn(self, inst)
             except Unsupported as exc:
                 if not self.should_compile_partial_graph():
                     raise
-                user_stack = "".join(
-                    traceback.format_list(
-                        [([self.frame_summary()] + list(reversed(exc.real_stack)))[-1]]
-                    )
-                ).strip()
-
+                user_stack = [self.frame_summary()] + list(reversed(exc.real_stack))
+                user_stack_formatted = "".join(traceback.format_list(user_stack))
+                frame_loc = (user_stack[-1].filename, user_stack[-1].lineno)
                 # torchdynamo.explain() formats this a little nicer, and presents a slightly
                 # more actionable user code pointer
-                if not explain:
-                    log.info(f"Graph break: {exc} from user code at {user_stack}")
+                if not explain and graph_break_dup_warning_checker.add(frame_loc):
+                    log.info(
+                        f"Graph break: {exc} from user code at {user_stack_formatted}"
+                    )
 
                 exc.remove_from_stats()
                 exc.add_to_stats("graph_break")
-                msg = exc.msg
+                reason = GraphCompileReason(exc.msg, user_stack)
             self.restore_graphstate(state)
-            self.output.compile_subgraph(self, msg=msg)
+            self.output.compile_subgraph(self, reason=reason)
             self.popn(push - dis.stack_effect(inst.opcode, inst.arg))
 
             for _ in range(push):
@@ -526,8 +533,13 @@ class InstructionTranslatorBase(object):
     def load_builtin(self, inst):
         assert inst.argval in self.f_builtins
         val = self.f_builtins[inst.argval]
-        assert is_builtin(val)
-        self.push(VariableBuilder(self, GlobalSource(inst.argval))(val))
+
+        if callable(val):
+            assert is_builtin_callable(val)
+            self.push(VariableBuilder(self, GlobalSource(inst.argval))(val))
+        else:
+            assert is_builtin_constant(val)
+            self.push(ConstantVariable(value=val))
 
     def jump(self, inst):
         self.instruction_pointer = self.indexof[id(inst.target)]
@@ -779,7 +791,9 @@ class InstructionTranslatorBase(object):
             self.restore_graphstate(prior)
 
         # break the graph
-        self.output.compile_subgraph(self, "store_attr")
+        self.output.compile_subgraph(
+            self, reason=GraphCompileReason("store_attr", [self.frame_summary()])
+        )
         self.output.add_output_instructions([inst])
         self.popn(2)
         self.output.add_output_instructions(
@@ -1200,6 +1214,15 @@ class InstructionTranslatorBase(object):
                 if len(obj) != 0:
                     return False
         return True
+
+    def format_frame_summary(self, additional_stack_frames=None):
+        if additional_stack_frames is None:
+            additional_stack_frames = []
+        return "".join(
+            traceback.format_list(
+                ([self.frame_summary()] + list(reversed(additional_stack_frames)))
+            )
+        )
 
     def frame_summary(self):
         return traceback.FrameSummary(

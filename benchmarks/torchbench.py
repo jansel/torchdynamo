@@ -154,15 +154,12 @@ SLOW_BENCHMARKS = {
 
 # https://github.com/pytorch/torchdynamo/issues/519
 AOT_AUTOGRAD_NOT_YET_WORKING = {
-    # https://github.com/pytorch/functorch/issues/586
+    # https://github.com/pytorch/torchdynamo/issues/1147
     "tts_angular",
     "demucs",
-    "tacotron2",  # also has an issue with normalize_ir
-    # https://github.com/pytorch/torchdynamo/issues/590
+    # https://github.com/pytorch/torchdynamo/issues/739
     "pyhpc_isoneutral_mixing",
     "vision_maskrcnn",
-    # https://github.com/pytorch/torchdynamo/issues/80
-    "hf_BigBird",
     # https://github.com/pytorch/pytorch/issues/81526
     "moco",
     # https://github.com/pytorch/pytorch/issues/81529
@@ -186,19 +183,10 @@ AOT_AUTOGRAD_NOT_YET_WORKING = {
 # https://github.com/pytorch/torchdynamo/issues/332
 INDUCTOR_INFERENCE_NOT_YET_WORKING = {
     *AOT_AUTOGRAD_NOT_YET_WORKING,
-    # https://github.com/pytorch/torchdynamo/issues/838
-    "hf_Reformer",
-    # RuntimeError: expected scalar type Half but found Float
-    "hf_DistilBert",
 }
 
 INDUCTOR_TRAINING_NOT_YET_WORKING = {
     *INDUCTOR_INFERENCE_NOT_YET_WORKING,
-    # TypeError: expected Tensor as element 0 in argument 1, but got NoneType
-    "dlrm",
-    # RuntimeError: expected scalar type Float but found Half
-    "mobilenet_v2_quantized_qat",
-    "resnet50_quantized_qat",
 }
 
 TRT_NOT_YET_WORKING = {

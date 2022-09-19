@@ -1,5 +1,6 @@
 import collections
 import dataclasses
+import functools
 import hashlib
 from itertools import count
 from typing import Any
@@ -186,9 +187,11 @@ class WrapperCodeGen(CodeGen):
                 import torch
                 import random
                 from torch import empty_strided, as_strided, device
-                from {codecache.__name__} import CppCodeCache, TritonCodeCache
+                from torch._C import _cuda_getCurrentRawStream as get_cuda_stream
+                from {codecache.__name__} import AsyncCompile
 
                 aten = torch.ops.aten
+                async_compile = AsyncCompile()
 
             """
         )
@@ -196,13 +199,7 @@ class WrapperCodeGen(CodeGen):
         if has_triton():
             self.header.splice(
                 """
-                    import triton
-                    import triton.language as tl
-
-                    from torchinductor.triton_ops.autotune import pointwise_heuristics
-                    from torchinductor.triton_ops.autotune import reduction_heuristics
-                    from torchinductor.triton_ops.autotune import grid
-
+                from torchinductor.triton_ops.autotune import grid
                 """
             )
 
@@ -229,7 +226,14 @@ class WrapperCodeGen(CodeGen):
                 )
 
         self.prefix.writelines(
-            ["", "", f"def call({', '.join(V.graph.graph_inputs.keys())}):"]
+            [
+                "",
+                "",
+                "async_compile.wait(globals())",
+                "del async_compile" "",
+                "",
+                f"def call({', '.join(V.graph.graph_inputs.keys())}):",
+            ]
         )
         with self.prefix.indent():
             for name in V.graph.randomness_seeds:
@@ -245,6 +249,12 @@ class WrapperCodeGen(CodeGen):
 
         self.allocated = set()
         self.freed = set()
+        self.get_cuda_stream = functools.lru_cache(None)(self.get_cuda_stream)
+
+    def get_cuda_stream(self, index):
+        name = f"stream{index}"
+        self.writeline(f"{name} = get_cuda_stream({index})")
+        return name
 
     def next_kernel_name(self):
         return f"kernel{next(self._names_iter)}"

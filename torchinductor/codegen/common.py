@@ -358,9 +358,11 @@ class KernelArgs:
     def python_argdefs(self):
         arg_defs = []
         call_args = []
+        precompile_args = []
         for inplaced in unique(self.inplace_buffers.values()):
             arg_defs.append(inplaced.inner_name)
             call_args.append(inplaced.other_names[-1])
+            precompile_args.append(repr(V.graph.get_dtype(inplaced.other_names[-1])))
         for outer, inner in chain(
             self.input_buffers.items(), self.output_buffers.items()
         ):
@@ -368,10 +370,14 @@ class KernelArgs:
                 continue
             arg_defs.append(inner)
             call_args.append(outer)
+            precompile_args.append(repr(V.graph.get_dtype(outer)))
         for outer, inner in self.sizevars.items():
             arg_defs.append(inner)
             call_args.append(outer)
-        return arg_defs, call_args
+            precompile_args.append(
+                repr(V.graph.sizevars.size_hint(sympy.expand(outer)))
+            )
+        return arg_defs, call_args, precompile_args
 
     def aliases(self):
         for inplaced in unique(self.inplace_buffers.values()):

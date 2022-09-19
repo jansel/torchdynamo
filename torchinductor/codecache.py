@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import functools
 import getpass
 import hashlib
@@ -6,11 +7,18 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import sysconfig
 import tempfile
 import types
 from ctypes import cdll
+from multiprocessing.pool import AsyncResult
+from multiprocessing.pool import ThreadPool
+from typing import Any
+from typing import Callable
+from typing import Dict
 
+from torch.multiprocessing import Pool
 from torch.utils import cpp_extension
 
 from . import config
@@ -147,6 +155,10 @@ class CppCodeCache:
 
         return cls.cache[key]
 
+    @classmethod
+    def precompile(cls, source_code):
+        return cls.load(source_code).kernel
+
 
 class PyCodeCache:
     cache = dict()
@@ -174,7 +186,53 @@ def patch_triton_dir():
 
 
 class TritonCodeCache:
+    @staticmethod
+    def get_name(mod):
+        (name,) = [n for n in dir(mod) if n.startswith("kernel")]
+        return name
+
     @classmethod
     def load(cls, source_code):
         patch_triton_dir()
-        return PyCodeCache.load(source_code)
+        mod = PyCodeCache.load(source_code)
+        return getattr(mod, cls.get_name(mod))
+
+    @staticmethod
+    def precompile(source_code, args, numels):
+        from .triton_ops.autotune import grid
+
+        fn = TritonCodeCache.load(source_code)
+        fn[grid(*numels)].warmup(*args, *numels)
+        return fn
+
+
+class AsyncCompile:
+    @staticmethod
+    @functools.lru_cache(1)
+    def pool():
+        return ThreadPool(config.compile_threads)
+
+    def __init__(self):
+        self.pending = dict()
+
+    def triton(self, source_code, args, numels):
+        if source_code in self.pending:
+            return self.pending[source_code]
+        res = self.pool().apply_async(
+            TritonCodeCache.precompile, (source_code, args, numels)
+        )
+        self.pending[source_code] = res
+        return res
+
+    def cpp(self, source_code):
+        if source_code in self.pending:
+            return self.pending[source_code]
+        res = self.pool().apply_async(CppCodeCache.precompile, (source_code,))
+        self.pending[source_code] = res
+        return res
+
+    def wait(self, scope: Dict[str, Any]):
+        for key, value in list(scope.items()):
+            if isinstance(value, AsyncResult):
+                scope[key] = value.get()
+        self.pending.clear()

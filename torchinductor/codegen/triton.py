@@ -932,7 +932,7 @@ class TritonKernel(Kernel):
             """
         code.splice(heuristics_line)
 
-        argdefs, _ = self.args.python_argdefs()
+        argdefs, _, precompile_args = self.args.python_argdefs()
 
         if config.dynamic_shapes:
             maybe_const = ""
@@ -958,9 +958,16 @@ class TritonKernel(Kernel):
             return code.getvalue()
 
         wrapper = IndentedBuffer()
-        wrapper.writeline("TritonCodeCache.load('''")
+        wrapper.writeline("async_compile.triton('''")
         wrapper.splice(code.getvalue(), strip=True)
-        wrapper.writeline("''').{kernel_name}")
+
+        precompile_args = ", ".join(precompile_args)
+        precompile_numels = ", ".join(
+            repr(V.graph.sizevars.size_hint(tree.numel))
+            for tree in self.range_trees
+            if tree.prefix != "r" or self.inside_reduction
+        )
+        wrapper.writeline(f"''', [{precompile_args}], [{precompile_numels}])")
         return wrapper.getvalue()
 
     def reshape_size_str(self, i=None, x=None):
@@ -979,7 +986,7 @@ class TritonKernel(Kernel):
         return f"[{', '.join(sizes)}]"
 
     def call_kernel(self, code, name: str):
-        _, call_args = self.args.python_argdefs()
+        _, call_args, _ = self.args.python_argdefs()
         grid = []
         # TODO(jansel): if there are constants, we shouldn't bother passing them as args
         for tree in self.range_trees:
@@ -993,7 +1000,10 @@ class TritonKernel(Kernel):
             if tree.prefix != "r":
                 grid.append(expr)
         call_args = ", ".join(call_args)
-        code.writeline(f"{name}[grid({', '.join(grid)})]({call_args})")
+        code.writeline(
+            f"{name}[grid({', '.join(grid)})]({call_args}, "
+            f"stream={code.get_cuda_stream(V.graph.scheduler.current_device.index)})"
+        )
 
 
 class TritonScheduling:

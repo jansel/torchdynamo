@@ -3,7 +3,6 @@ import hashlib
 import json
 import logging
 import os.path
-import time
 from typing import List
 
 import triton
@@ -13,6 +12,7 @@ from triton import heuristics
 from triton import next_power_of_2
 from triton.ops.matmul import get_configs_io_bound
 from triton.ops.matmul_perf_model import early_config_prune as mm_early_config_prune
+from triton.runtime.autotuner import Autotuner
 
 from torchinductor import config
 from torchinductor.ir import ReductionHint
@@ -23,11 +23,6 @@ from .conv_perf_model import early_config_prune as conv_early_config_prune
 from .conv_perf_model import estimate_conv_time
 
 log = logging.getLogger(__name__)
-
-try:
-    from triton.runtime.autotuner import Autotuner
-except ModuleNotFoundError:
-    assert False
 
 
 class CachingAutotuner(Autotuner):
@@ -41,38 +36,33 @@ class CachingAutotuner(Autotuner):
         assert not self.early_config_prune
         assert not self.perf_model
         self.save_cache_hook = save_cache_hook
-        self.kernel = kernel
 
-    def __call__(self, *args, **kwargs):
-        raise NotImplementedError()
+    def autotune_to_one_config(self, *args, **kwargs):
+        self.nargs = dict(zip(self.arg_names, args))
+        timings = {
+            cfg: self._bench(*args, config=cfg, **kwargs)
+            for cfg in self.prune_configs(kwargs)
+        }
+        self.configs = [builtins.min(timings, key=timings.get)]
+        if self.save_cache_hook:
+            self.save_cache_hook(self.configs[0])
+        self.nargs = None
 
-    def __getitem__(self, grid):
-        def call(*args, **kwargs):
-            if len(self.configs) > 1:
-                bench_start = time.time()
-                self.run = self.kernel[grid]
-                timings = {
-                    config: self._bench(*args, config=config, **kwargs)
-                    for config in self.configs
-                }
-                self.bench_time = time.time() - bench_start
-                self.configs = [builtins.min(timings, key=timings.get)]
-                if self.save_cache_hook:
-                    self.save_cache_hook(self.configs[0])
+    def run(self, *args, **kwargs):
+        if len(self.configs) > 1:
+            self.autotune_to_one_config(*args, **kwargs)
 
-            config = self.configs[0]
-            if config.pre_hook is not None:
-                config.pre_hook(dict(zip(self.arg_names, args)))
+        (cfg,) = self.configs
+        if cfg.pre_hook is not None:
+            cfg.pre_hook(dict(zip(self.arg_names, args)))
 
-            return self.kernel[grid](
-                *args,
-                num_warps=config.num_warps,
-                num_stages=config.num_stages,
-                **kwargs,
-                **config.kwargs,
-            )
-
-        return call
+        return self.fn.run(
+            *args,
+            num_warps=cfg.num_warps,
+            num_stages=cfg.num_stages,
+            **kwargs,
+            **cfg.kwargs,
+        )
 
 
 def hash_configs(configs: List[Config]):
@@ -565,7 +555,7 @@ def grid(xnumel, ynumel=None, znumel=None):
 
     def grid_fn(meta):
         result = [cdiv(xnumel, meta["XBLOCK"])]
-        if ynumel:
+        if ynumel and "YBLOCK" in meta:
             result.append(cdiv(ynumel, meta["YBLOCK"]))
             if znumel:
                 result.append(cdiv(znumel, meta["ZBLOCK"]))

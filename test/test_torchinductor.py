@@ -1508,6 +1508,7 @@ class CommonTemplate:
         y_correct = torch.conv2d(x, w, bias, stride, padding, dilation, groups)
         self.assertTrue(same(y, y_correct, cos_similarity=True, tol=0.1))
 
+    @unittest.skip("TODO")
     @requires_cuda()
     @patch.object(config.triton, "convolution", "autotune")
     @patch.object(config.triton, "dense_indexing", "True")

@@ -162,7 +162,8 @@ def cudagraphify_impl(model, inputs, static_input_idxs=()):
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        model(*inputs)
+        for _ in range(3):
+            model(*static_inputs)
     stream.synchronize()
     torch.cuda.current_stream().wait_stream(stream)
     torch.cuda.synchronize()

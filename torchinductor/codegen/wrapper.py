@@ -185,8 +185,11 @@ class WrapperCodeGen(CodeGen):
             f"""
                 from ctypes import c_void_p, c_long
                 import torch
+                import triton
+                import triton.language as tl
                 import random
                 from torch import empty_strided, as_strided, device
+                # get_cuda_stream = lambda dev_idx: torch.cuda.current_stream(dev_idx).cuda_stream
                 from torch._C import _cuda_getCurrentRawStream as get_cuda_stream
                 from {codecache.__name__} import AsyncCompile
 

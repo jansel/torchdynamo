@@ -1,5 +1,4 @@
 import base64
-import dataclasses
 import functools
 import getpass
 import hashlib
@@ -7,7 +6,6 @@ import logging
 import os
 import re
 import subprocess
-import sys
 import sysconfig
 import tempfile
 import types
@@ -15,10 +13,8 @@ from ctypes import cdll
 from multiprocessing.pool import AsyncResult
 from multiprocessing.pool import ThreadPool
 from typing import Any
-from typing import Callable
 from typing import Dict
 
-from torch.multiprocessing import Pool
 from torch.utils import cpp_extension
 
 from . import config
@@ -215,21 +211,21 @@ class AsyncCompile:
     def __init__(self):
         self.pending = dict()
 
-    def triton(self, source_code, args, numels):
+    def _compile_cached(self, fn, source_code, *args):
         if source_code in self.pending:
             return self.pending[source_code]
-        res = self.pool().apply_async(
-            TritonCodeCache.precompile, (source_code, args, numels)
-        )
+        if config.compile_threads == 1:
+            res = fn(source_code, *args)
+        else:
+            res = self.pool().apply_async(fn, (source_code, *args))
         self.pending[source_code] = res
         return res
 
+    def triton(self, *args):
+        return self._compile_cached(TritonCodeCache.precompile, *args)
+
     def cpp(self, source_code):
-        if source_code in self.pending:
-            return self.pending[source_code]
-        res = self.pool().apply_async(CppCodeCache.precompile, (source_code,))
-        self.pending[source_code] = res
-        return res
+        return self._compile_cached(CppCodeCache.precompile, source_code)
 
     def wait(self, scope: Dict[str, Any]):
         for key, value in list(scope.items()):

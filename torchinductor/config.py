@@ -51,7 +51,7 @@ unroll_reductions_threshold = 8
 
 comment_origin = False
 
-compile_threads = 8
+compile_threads = 1
 
 
 # config specific to codegen/cpp.pp

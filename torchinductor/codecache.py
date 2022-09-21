@@ -198,7 +198,7 @@ class TritonCodeCache:
         from .triton_ops.autotune import grid
 
         fn = TritonCodeCache.load(source_code)
-        fn[grid(*numels)].warmup(*args, *numels)
+        # fn.warmup(*args, *numels, grid=grid(*numels))
         return fn
 
 

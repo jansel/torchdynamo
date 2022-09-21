@@ -1481,6 +1481,7 @@ class CommonTemplate:
         self.assertEqual(a.stride(), c.stride())
         self.assertEqual(c.stride()[2], 1)
 
+    @unittest.skip("TODO")
     @requires_cuda()
     @patch.object(config.triton, "convolution", "triton")
     @patch.object(config.triton, "dense_indexing", "True")
@@ -1536,6 +1537,7 @@ class CommonTemplate:
         y_correct = torch.conv2d(x, w, bias, stride, padding, dilation, groups)
         self.assertTrue(same(y, y_correct, cos_similarity=True, tol=0.1))
 
+    @unittest.skip("TODO")
     @patch.object(config.triton, "mm", "triton")
     def test_triton_mm2(self):
         @torchdynamo.optimize("inductor", nopython=True)

@@ -187,6 +187,12 @@ INDUCTOR_INFERENCE_NOT_YET_WORKING = {
 
 INDUCTOR_TRAINING_NOT_YET_WORKING = {
     *INDUCTOR_INFERENCE_NOT_YET_WORKING,
+    "dhen_5x_dense",
+    "dlrm",
+    "drq",
+    "hf_Reformer",
+    "soft_actor_critic",
+    "tacotron2",
 }
 
 TRT_NOT_YET_WORKING = {

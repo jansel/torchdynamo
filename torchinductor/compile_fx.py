@@ -21,11 +21,11 @@ from . import overrides
 from .debug import DebugContext
 from .decomposition import select_decomp_table
 from .graph import GraphLowering
-from .utils import ceildiv
 from .utils import has_incompatible_cudagraph_ops
 from .virtualized import V
 
 log = logging.getLogger(__name__)
+ALIGNMENT = 16
 
 
 @dataclasses.dataclass
@@ -129,26 +129,41 @@ def cudagraphify(model, inputs, static_input_idxs=()):
     return run
 
 
+def remove_unaligned_input_idxs(inputs, static_input_idxs):
+    """
+    We require all inputs to be aligned, so introduce a copy for any
+    that aren't.
+    """
+    aligned_static_input_idxs = {
+        idx for idx in static_input_idxs if (inputs[idx].data_ptr() % ALIGNMENT) == 0
+    }
+    if len(aligned_static_input_idxs) != len(static_input_idxs):
+        return aligned_static_input_idxs
+    return static_input_idxs
+
+
 def cudagraphify_impl(model, inputs, static_input_idxs=()):
     """
     Assumes inputs[static_input_idxs[i]] are always the same memory address
     """
+    static_input_idxs = remove_unaligned_input_idxs(inputs, static_input_idxs)
 
     def static_input(x):
-        # make sure alignment and contiguity of inputs is preserved
+        """
+        Copy and input why preserving strides
+        """
+        # TODO(jansel): figure out why this version doesn't work:
+        # return torch.empty_strided(x.size(), x.stride(), dtype=x.dtype, device=x.device)
+
         needed_size = (
             sum((shape - 1) * stride for shape, stride in zip(x.size(), x.stride())) + 1
         )
-        needed_size = ceildiv(needed_size, 32) * 32
         buffer = torch.zeros(needed_size, dtype=x.dtype, device=x.device)
-        cache_line_offset = (
-            (x.data_ptr() - buffer.data_ptr()) % 32
-        ) // x.element_size()
-        return torch.as_strided(buffer, x.size(), x.stride(), cache_line_offset)
+        return torch.as_strided(buffer, x.size(), x.stride())
 
     assert isinstance(inputs, (list, tuple))
     static_inputs = [
-        static_input(x) if idx not in static_input_idxs else inputs[idx]
+        static_input(x) if idx not in static_input_idxs else x
         for idx, x in enumerate(inputs)
     ]
 
@@ -162,8 +177,7 @@ def cudagraphify_impl(model, inputs, static_input_idxs=()):
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        for _ in range(3):
-            model(*static_inputs)
+        model(*static_inputs)
     stream.synchronize()
     torch.cuda.current_stream().wait_stream(stream)
     torch.cuda.synchronize()

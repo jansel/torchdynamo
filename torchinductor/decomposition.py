@@ -50,6 +50,9 @@ decompositions = get_decompositions(
         aten.hardtanh_backward,
         aten.im2col,
         aten.im2col_backward,
+        aten.index_add,
+        aten.index_add_,
+        aten.index_select,
         aten.l1_loss,
         aten.leaky_relu,
         aten.leaky_relu_backward,
@@ -323,6 +326,12 @@ def sgn(self):
 @register_decomposition([aten.fill.Scalar])
 def fill_scalar(self, value):
     return torch.full_like(self, value)
+
+
+@register_decomposition([aten.fill.Tensor])
+def fill_tensor(self, value: Tensor):
+    assert value.dim() == 0, "aten.fill.Tensor only supports 0-dimension value tensor"
+    return torch.full_like(self, value.item())
 
 
 """

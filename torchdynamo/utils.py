@@ -183,6 +183,20 @@ LOGGING_CONFIG = {
 }
 
 
+tensortype_to_dtype = {
+    torch.FloatTensor: (torch.float32, torch.float),
+    torch.DoubleTensor: (torch.float64, torch.double),
+    torch.HalfTensor: (torch.float16, torch.half),
+    torch.BFloat16Tensor: (torch.bfloat16,),
+    torch.ByteTensor: (torch.uint8,),
+    torch.CharTensor: (torch.int8,),
+    torch.LongTensor: (torch.int64, torch.long),
+    torch.IntTensor: (torch.int32, torch.int),
+    torch.ShortTensor: (torch.int16, torch.short),
+    torch.BoolTensor: (torch.bool,),
+}
+
+
 # initialize torchdynamo loggers
 def init_logging():
     if "PYTEST_CURRENT_TEST" not in os.environ:
@@ -772,18 +786,19 @@ def same(
             if fp64_ref.dtype == torch.float64:
                 ref_error = rmse(fp64_ref, ref).item()
                 res_error = rmse(fp64_ref, res).item()
-                multiplier = 1.1
+                multiplier = 2
 
-                if fp64_ref.numel() < 500:
-                    # In the presence of noise, noise might dominate our error
-                    # metric for smaller tensors.
-                    multiplier = 2
+                # if fp64_ref.numel() < 500:
+                #     # In the presence of noise, noise might dominate our error
+                #     # metric for smaller tensors.
+                #     multiplier = 2.5
 
                 passes_test = res_error <= (multiplier * ref_error + 1e-5)
                 if not passes_test:
-                    log.warning(
+                    log.error(
                         f"RMSE (res-fp64): {res_error:.5f}, (ref-fp64): {ref_error:.5f}"
                     )
+                    # import pdb; pdb.set_trace()
                 return passes_test
 
             return False

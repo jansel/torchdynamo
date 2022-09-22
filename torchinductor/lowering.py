@@ -1059,7 +1059,7 @@ def arange(
     assert isinstance(step, int)
 
     dtype = dtype or torch.int64
-    length = (end - start) // step
+    length = ceildiv((end - start), step)
     start = sympy.Integer(start)
     step = sympy.Integer(step)
 
@@ -1323,7 +1323,9 @@ def full_like(x, fill_value, **kwargs):
 
 def tensor_constructor(fill_value):
     # torch.zeros, torch.ones, etc
-    def inner(*size, dtype=None, device=None, layout=0, pin_memory=False):
+    def inner(
+        *size, dtype=None, device=None, layout=0, pin_memory=False, memory_format=None
+    ):
         assert not pin_memory
         assert layout in (0, torch.strided)
         device = decode_device(device)
@@ -1599,29 +1601,6 @@ def index_put_(self, indices, values, accumulate=False):
     )
     buffer.name = V.graph.register_buffer(buffer)
     return self
-
-
-@register_lowering(aten.index_select, type_promote=False)
-def index_select(x, dim, indices):
-    x_loader = x.make_loader()
-    index_loader = indices.make_loader()
-    dim = _validate_dim(x, dim, 0)
-
-    sizes = list(x.get_size())
-    (sizes[dim],) = indices.get_size()
-
-    def fn(idx):
-        assert len(idx) == len(sizes)
-        idx = list(idx)
-        idx[dim] = ops.indirect_indexing(index_loader([idx[dim]]))
-        return x_loader(idx)
-
-    return Pointwise.create(
-        device=x.get_device(),
-        dtype=x.get_dtype(),
-        inner_fn=fn,
-        ranges=sizes,
-    )
 
 
 @register_lowering(aten.scatter_, type_promote=False)
@@ -2899,6 +2878,7 @@ def register_inplace(aten_op, outplace_op):
     @register_lowering(aten_op, type_promote=False)
     def fn(*args, **kwargs):
         result = outplace_op(*args, **kwargs)
+        result = to_dtype(result, args[0].get_dtype())
         return mutate_to(args[0], result)
 
     return fn

@@ -67,7 +67,6 @@ def complex_memory_overlap(t):
 def compile_fx_inner(
     gm: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor],
-    wrap=identity,
     cudagraphs=None,
     num_fixed=0,
     is_backward=False,
@@ -80,8 +79,8 @@ def compile_fx_inner(
 
     graph = GraphLowering(gm, num_dynamic_inputs=len(example_inputs))
     with V.set_graph_handler(graph):
-        wrap(graph.run)(*example_inputs)
-        compiled_fn = wrap(graph.compile_to_fn())
+        graph.run(*example_inputs)
+        compiled_fn = graph.compile_to_fn()
 
     complex_memory_overlap_inputs = any(
         complex_memory_overlap(t) for t in example_inputs
@@ -107,7 +106,38 @@ def compile_fx_inner(
         elif complex_memory_overlap_inputs:
             log.warning("skipping cudagraphs due to complex input striding")
 
-    return compiled_fn
+    return align_inputs(compiled_fn, example_inputs, range(num_fixed))
+
+
+def clone_preserve_strides(x):
+    needed_size = (
+        sum((shape - 1) * stride for shape, stride in zip(x.size(), x.stride())) + 1
+    )
+    buffer = torch.as_strided(x, (needed_size,), (1,)).clone()
+    return torch.as_strided(buffer, x.size(), x.stride())
+
+
+def align_inputs(model, inputs, static_input_idxs=()):
+    check_inputs = [
+        i
+        for i in range(len(inputs))
+        if (i not in static_input_idxs or (inputs[i].data_ptr() % ALIGNMENT) != 0)
+        and inputs[i].device.type == "cuda"
+    ]
+
+    if len(check_inputs) == 0:
+        return model
+
+    def run(*new_inputs):
+        for i in check_inputs:
+            if new_inputs[i].data_ptr() % ALIGNMENT:
+                if isinstance(new_inputs, tuple):
+                    new_inputs = list(new_inputs)
+                new_inputs[i] = clone_preserve_strides(new_inputs[i])
+        return model(*new_inputs)
+
+
+    return run
 
 
 @dynamo_timed

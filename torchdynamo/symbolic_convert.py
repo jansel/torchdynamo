@@ -67,7 +67,7 @@ from .variables.lists import ListVariable
 from .variables.lists import SliceVariable
 from .variables.lists import TupleVariable
 from .variables.misc import ClosureVariable
-from .variables.misc import ContextManagerVariable
+from .variables.misc import ContextWrappingVariable
 from .variables.misc import GetAttrVariable
 from .variables.misc import GradModeVariable
 from .variables.misc import PythonModuleVariable
@@ -85,7 +85,7 @@ log = logging.getLogger(__name__)
 class BlockStackEntry:
     target: Instruction
     stack_index: int = None
-    with_context: ContextManagerVariable = None
+    with_context: ContextWrappingVariable = None
 
     def can_restore(self):
         return self.with_context is not None
@@ -565,7 +565,7 @@ class InstructionTranslatorBase(object):
 
     def SETUP_WITH(self, inst):
         ctx = self.pop()
-        if not isinstance(ctx, ContextManagerVariable):
+        if not isinstance(ctx, ContextWrappingVariable):
             unimplemented(f"SETUP_WITH {ctx}")
         self.output.guards.update(ctx.guards)
 
@@ -604,7 +604,14 @@ class InstructionTranslatorBase(object):
         self.push(None)
 
     def END_FINALLY(self, inst):
-        assert self.pop() is None
+        tos = self.pop()
+        if sys.version_info < (3, 8):
+            # python3.7 and 3.8 can have END_FINALLY without BEGIN_FINALLY
+            assert tos is None or (
+                tos.is_python_constant() and tos.as_python_constant() is None
+            )
+        else:
+            assert tos is None
 
     def FOR_ITER(self, inst):
         it = self.pop()
@@ -1236,7 +1243,8 @@ class InstructionTranslatorBase(object):
         self.output.guards.add(
             GlobalWeakRefSource(name).create_guard(GuardBuilder.WEAKREF_ALIVE)
         )
-        self.f_globals[name] = weakref.ref(value)
+        if name not in self.output.root_globals:
+            self.output.install_global(name, weakref.ref(value))
 
     @property
     def fake_mode(self):

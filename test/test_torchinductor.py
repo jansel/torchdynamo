@@ -611,7 +611,7 @@ class CommonTemplate:
 
         self.common(fn, (torch.randn(8, 8), torch.randn(8, 8)))
 
-    def test_arange(self):
+    def test_arange1(self):
         def fn(x):
             rng1 = torch.arange(8 * 8, dtype=torch.float32, device=x.device).view(8, 8)
             rng2 = torch.arange(10, 18, device=x.device)
@@ -620,12 +620,26 @@ class CommonTemplate:
 
         self.common(fn, (torch.randn(8, 8),))
 
-    def test_arange1(self):
+    def test_arange2(self):
         def fn(x):
             rng1 = torch.arange(8, device=x.device)
             return (x + rng1,)
 
         self.common(fn, (torch.randint(4, (8, 8)),), check_lowp=False)
+
+    def test_arange3(self):
+        def fn(x):
+            return x + torch.ops.aten.arange.start_step(
+                0, 53, 4, dtype=torch.int64, device=x.device
+            )
+
+        self.common(fn, (torch.randn(14),))
+
+    def test_arange4(self):
+        def fn(x):
+            return x - torch.arange(512, -512, -1.0, device=x.device)
+
+        self.common(fn, (torch.randn(1024),))
 
     def test_linspace(self):
         def fn(x):
@@ -1653,10 +1667,20 @@ class CommonTemplate:
             ),
         )
 
-    def test_fill(self):
+    def test_fill1(self):
         def fn(x):
             tmp = torch.ones_like(x)
             return tmp, aten.fill.Scalar(tmp, 2)
+
+        self.common(
+            fn,
+            (torch.randn([16, 16]),),
+        )
+
+    def test_fill2(self):
+        def fn(x):
+            tmp = torch.ones_like(x)
+            return tmp, aten.fill.Tensor(tmp, torch.tensor(3.0))
 
         self.common(
             fn,
@@ -2235,6 +2259,35 @@ class CommonTemplate:
 
         self.common(fn, (torch.randn([8, 1, 1]),))
 
+    def test_inplace_add(self):
+        @torchdynamo.optimize("inductor")
+        def fn(x, y):
+            return x.add_(y)
+
+        inputs = (
+            rand_strided((4, 4), (4, 1), device=self.device),
+            rand_strided((4, 4), (4, 1), device=self.device),
+        )
+        inp_clone = inputs[0].clone()
+        out = fn(*inputs)
+        self.assertTrue(same(out, inp_clone + inputs[1]))
+        self.assertTrue(out is inputs[0])
+
+    def test_inplace_mixed_dtype_ops(self):
+        @torchdynamo.optimize("inductor")
+        def fn(x, y):
+            z = x + y.float()
+            w = z.add_(y)
+            return w.mul_(y)
+
+        inputs = (
+            rand_strided((4, 4), (4, 1), device=self.device, dtype=torch.float),
+            rand_strided((4, 4), (4, 1), device=self.device, dtype=torch.double),
+        )
+        out = fn(*inputs)
+        out_eager = (inputs[0] + inputs[1].float()).add_(inputs[1]).mul_(inputs[1])
+        self.assertTrue(same(out, out_eager))
+
     @patch.object(config.triton, "cudagraphs", True)
     def test_strided_inputs(self):
         @torchdynamo.optimize("inductor")
@@ -2703,6 +2756,7 @@ class CommonTemplate:
 
         x = torch.ones(1000, device=self.device, dtype=torch.float32)
         result = fn(x)
+        print(result.nonzero().shape[0])
         self.assertTrue(400 < result.nonzero().shape[0] < 600)
         self.assertTrue(0.9 < result.mean().item() < 1.1)
 
@@ -3194,6 +3248,19 @@ class CommonTemplate:
         args = [rand_strided(shape, stride, dtype) for shape, stride, dtype in args]
         self.common(forward, args)
 
+    def test_sizehint_issue1(self):
+        def forward(x):
+            return torch.nn.functional.unfold(
+                x, kernel_size=[4, 4], dilation=1, padding=0, stride=[4, 4]
+            )
+
+        args = [((2, 24, 56, 56), (75264, 3136, 56, 1), torch.float32, False)]
+        args = [
+            rand_strided(sh, st, dt).requires_grad_(rg) for (sh, st, dt, rg) in args
+        ]
+        self.common(forward, args)
+
+    @unittest.skip("https://github.com/pytorch/torchdynamo/issues/1297")
     @patch.object(torchinductor.config.triton, "cudagraphs", False)
     def test_symbolic(self):
         def f(x):

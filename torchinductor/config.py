@@ -13,7 +13,7 @@ dynamic_shapes = True
 static_weight_shapes = True
 
 # put correctness assertions in generated code
-size_asserts = True
+size_asserts = False
 
 # enable loop reordering based on input orders
 pick_loop_orders = True

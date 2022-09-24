@@ -194,12 +194,8 @@ class TritonCodeCache:
         return getattr(mod, cls.get_name(mod))
 
     @staticmethod
-    def precompile(source_code, args, numels):
-        from .triton_ops.autotune import grid
-
-        fn = TritonCodeCache.load(source_code)
-        # fn.warmup(*args, *numels, grid=grid(*numels))
-        return fn
+    def precompile(source_code):
+        return TritonCodeCache.load(source_code)
 
 
 class AsyncCompile:

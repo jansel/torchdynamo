@@ -256,6 +256,7 @@ class WrapperCodeGen(CodeGen):
 
     def get_cuda_stream(self, index):
         name = f"stream{index}"
+        # self.writeline("torch.cuda.set_device(torch.cuda.current_device())")
         self.writeline(f"{name} = get_cuda_stream({index})")
         return name
 

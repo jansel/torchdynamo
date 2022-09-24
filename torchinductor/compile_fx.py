@@ -13,7 +13,6 @@ from torch.utils._mode_utils import no_dispatch
 from torchdynamo.optimizations.backends import aot_autograd
 from torchdynamo.optimizations.normalize import normalize_ir
 from torchdynamo.utils import dynamo_timed
-from torchdynamo.utils import identity
 from torchdynamo.utils import preserve_rng_state
 
 from . import config
@@ -135,7 +134,6 @@ def align_inputs(model, inputs, static_input_idxs=()):
                     new_inputs = list(new_inputs)
                 new_inputs[i] = clone_preserve_strides(new_inputs[i])
         return model(*new_inputs)
-
 
     return run
 

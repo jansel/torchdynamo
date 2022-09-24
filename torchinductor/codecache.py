@@ -165,13 +165,12 @@ class PyCodeCache:
         if key not in cls.cache:
             with open(path) as f:
                 code = compile(f.read(), path, "exec")
-                with cls.lock:
-                    if key not in cls.cache:
-                        mod = types.ModuleType(f"{__name__}.{key}")
-                        mod.__file__ = path
-                        exec(code, mod.__dict__, mod.__dict__)
-                        cls.cache[key] = mod
-                        cls.cache[key].key = key
+                mod = types.ModuleType(f"{__name__}.{key}")
+                mod.__file__ = path
+                exec(code, mod.__dict__, mod.__dict__)
+                if key not in cls.cache:
+                    cls.cache[key] = mod
+                    cls.cache[key].key = key
         return cls.cache[key]
 
 
@@ -224,8 +223,9 @@ class AsyncCompile:
         return [t.result() for t in [cls.pool().submit(fn, x) for x in seq]]
 
     def triton(self, source_code):
+        kernel = TritonCodeCache.load(source_code)
+
         def task():
-            kernel = TritonCodeCache.load(source_code)
             kernel.precompile()
             return kernel
 
@@ -233,7 +233,7 @@ class AsyncCompile:
 
     def cpp(self, source_code):
         def task():
-            return CppCodeCache.load(source_code)
+            return CppCodeCache.load(source_code).kernel
 
         return self.submit(task)
 

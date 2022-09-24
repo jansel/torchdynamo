@@ -38,7 +38,7 @@ try:
     # Requires functorch
     from torchinductor.compile_fx import compile_fx_inner
 except (ImportError, ModuleNotFoundError, AssertionError) as e:
-    print(e)
+    print(f"{type(e)}: {e}")
     raise unittest.SkipTest("requires sympy/functorch")
 
 
@@ -1504,7 +1504,6 @@ class CommonTemplate:
         self.assertEqual(a.stride(), c.stride())
         self.assertEqual(c.stride()[2], 1)
 
-    @unittest.skip("TODO")
     @requires_cuda()
     @patch.object(config.triton, "convolution", "triton")
     @patch.object(config.triton, "dense_indexing", "True")
@@ -1532,7 +1531,6 @@ class CommonTemplate:
         y_correct = torch.conv2d(x, w, bias, stride, padding, dilation, groups)
         self.assertTrue(same(y, y_correct, cos_similarity=True, tol=0.1))
 
-    @unittest.skip("TODO")
     @requires_cuda()
     @patch.object(config.triton, "convolution", "autotune")
     @patch.object(config.triton, "dense_indexing", "True")
@@ -1560,7 +1558,6 @@ class CommonTemplate:
         y_correct = torch.conv2d(x, w, bias, stride, padding, dilation, groups)
         self.assertTrue(same(y, y_correct, cos_similarity=True, tol=0.1))
 
-    @unittest.skip("TODO")
     @patch.object(config.triton, "mm", "triton")
     def test_triton_mm2(self):
         @torchdynamo.optimize("inductor", nopython=True)
@@ -2765,7 +2762,6 @@ class CommonTemplate:
 
         x = torch.ones(1000, device=self.device, dtype=torch.float32)
         result = fn(x)
-        print(result.nonzero().shape[0])
         self.assertTrue(400 < result.nonzero().shape[0] < 600)
         self.assertTrue(0.9 < result.mean().item() < 1.1)
 

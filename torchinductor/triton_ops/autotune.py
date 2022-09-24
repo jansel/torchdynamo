@@ -59,38 +59,38 @@ class CachingAutotuner(KernelInterface):
         self.save_cache_hook = save_cache_hook
         self.configs = configs
         self.launchers = []
+        self.lock = threading.Lock()
 
     def precompile(self):
-        asyncio.run(self.precompile_async())
+        with self.lock:
+            if self.launchers:
+                return
+            self.launchers = AsyncCompile.map(self._precompile_config, self.configs)
+            self.configs = None
 
-    async def precompile_async(self):
-        tasks = [self._precompile_config(cfg) for cfg in self.configs]
-        self.launchers = await asyncio.gather(*tasks)
-
-    async def _precompile_config(self, cfg: triton.runtime.autotuner.Config):
+    def _precompile_config(self, cfg: triton.runtime.autotuner.Config):
         """Ahead of time compile a given autotuner config."""
         torch.cuda.set_device(torch.cuda.current_device())
         compile_meta = copy.deepcopy(self.meta)
         for k, v in cfg.kwargs.items():
             compile_meta["constants"][self.fn.arg_names.index(k)] = v
-        major, minor = torch.cuda.get_device_capability(compile_meta["device"])
-        compile_meta["cc"] = major * 10 + minor
         compile_meta["num_warps"] = cfg.num_warps
         compile_meta["num_stages"] = cfg.num_stages
 
         if config.compile_threads > 1:
-            with AsyncCompile.semaphore():
-                try:
-                    p = multiprocessing.Process(
-                        target=triton.compile,
-                        args=(self.fn,),
-                        kwargs={**compile_meta, "warm_cache_only": True},
-                    )
-                    p.start()
-                    p.join()
-                except Exception:
-                    log.exception("Error in async Triton compile")
-                    # continue on to hopefully get a better error message below
+            major, minor = torch.cuda.get_device_capability(compile_meta["device"])
+            compile_meta["cc"] = major * 10 + minor
+            try:
+                p = multiprocessing.Process(
+                    target=triton.compile,
+                    args=(self.fn,),
+                    kwargs={**compile_meta, "warm_cache_only": True},
+                )
+                p.start()
+                p.join()
+            except Exception:
+                log.exception("Error in async Triton compile")
+                # continue on to hopefully get a better error message below
 
         binary = triton.compile(
             self.fn,

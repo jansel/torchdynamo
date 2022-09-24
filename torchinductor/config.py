@@ -52,7 +52,7 @@ unroll_reductions_threshold = 8
 
 comment_origin = False
 
-compile_threads = multiprocessing.cpu_count()
+compile_threads = 1
 
 
 # config specific to codegen/cpp.pp

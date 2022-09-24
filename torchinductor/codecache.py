@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import dataclasses
 import functools
@@ -12,6 +11,8 @@ import sysconfig
 import tempfile
 import threading
 import types
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import cdll
 from typing import Any
 from typing import Dict
@@ -156,6 +157,7 @@ class CppCodeCache:
 class PyCodeCache:
     cache = dict()
     clear = staticmethod(cache.clear)
+    lock = threading.Lock()
 
     @classmethod
     def load(cls, source_code):
@@ -163,11 +165,13 @@ class PyCodeCache:
         if key not in cls.cache:
             with open(path) as f:
                 code = compile(f.read(), path, "exec")
-                mod = types.ModuleType(f"{__name__}.{key}")
-                mod.__file__ = path
-                exec(code, mod.__dict__, mod.__dict__)
-                cls.cache[key] = mod
-                cls.cache[key].key = key
+                with cls.lock:
+                    if key not in cls.cache:
+                        mod = types.ModuleType(f"{__name__}.{key}")
+                        mod.__file__ = path
+                        exec(code, mod.__dict__, mod.__dict__)
+                        cls.cache[key] = mod
+                        cls.cache[key].key = key
         return cls.cache[key]
 
 
@@ -203,38 +207,37 @@ class CompileResult:
 class AsyncCompile:
     @staticmethod
     @functools.lru_cache(1)
-    def semaphore():
-        return threading.Semaphore(config.compile_threads)
+    def pool():
+        assert config.compile_threads > 1
+        return ThreadPoolExecutor(config.compile_threads)
 
-    def __init__(self):
-        self.tasks = []
+    @classmethod
+    def submit(cls, task):
+        if config.compile_threads == 1:
+            return task()
+        return cls.pool().submit(task)
+
+    @classmethod
+    def map(cls, fn, seq):
+        if config.compile_threads == 1 or len(seq) <= 1:
+            return list(map(fn, seq))
+        return [t.result() for t in [cls.pool().submit(fn, x) for x in seq]]
 
     def triton(self, source_code):
-        async def task():
+        def task():
             kernel = TritonCodeCache.load(source_code)
-            await kernel.precompile_async()
-            result.value = kernel
+            kernel.precompile()
+            return kernel
 
-        result = CompileResult()
-        self.tasks.append(task())
-        return result
+        return self.submit(task)
 
     def cpp(self, source_code):
-        async def task():
-            with self.semaphore():
-                result.value = CppCodeCache.load(source_code)
+        def task():
+            return CppCodeCache.load(source_code)
 
-        result = CompileResult()
-        self.tasks.append(task())
-        return result
+        return self.submit(task)
 
     def wait(self, scope: Dict[str, Any]):
-        async def gather():
-            await asyncio.gather(*self.tasks)
-
-        asyncio.run(gather())
-
         for key, result in list(scope.items()):
-            if isinstance(result, CompileResult):
-                scope[key] = result.value
-        self.tasks.clear()
+            if isinstance(result, Future):
+                scope[key] = result.result()

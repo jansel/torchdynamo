@@ -217,8 +217,14 @@ class AsyncCompile:
         self.pending[source_code] = res
         return res
 
-    def triton(self, *args):
-        return self._compile_cached(TritonCodeCache.precompile, *args)
+    def triton(self, source_code):
+        kernel = TritonCodeCache.load(source_code)
+
+        def async_job(_):
+            kernel.precompile()
+            return kernel
+
+        return self._compile_cached(async_job, source_code)
 
     def cpp(self, source_code):
         return self._compile_cached(CppCodeCache.precompile, source_code)

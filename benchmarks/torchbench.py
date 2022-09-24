@@ -193,6 +193,8 @@ INDUCTOR_TRAINING_NOT_YET_WORKING = {
     "hf_Reformer",
     "soft_actor_critic",
     "tacotron2",
+    "mobilenet_v2_quantized_qat",
+    "resnet50_quantized_qat",
 }
 
 TRT_NOT_YET_WORKING = {

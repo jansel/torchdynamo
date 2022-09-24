@@ -48,9 +48,13 @@ class CachingAutotuner(KernelInterface):
         self.fn = fn
         self.meta = meta
         self.save_cache_hook = save_cache_hook
-        self.launchers = [self.precompile(cfg) for cfg in configs]
+        self.configs = configs
+        self.launchers = []
 
-    def precompile(self, config: triton.runtime.autotuner.Config):
+    def precompile(self):
+        self.launchers = [self.precompile_config(cfg) for cfg in self.configs]
+
+    def precompile_config(self, config: triton.runtime.autotuner.Config):
         """Ahead of time compile a given autotuner config."""
         torch.cuda.set_device(torch.cuda.current_device())
         compile_meta = copy.deepcopy(self.meta)
@@ -121,8 +125,11 @@ class CachingAutotuner(KernelInterface):
             self.save_cache_hook(self.launchers[0].config)
 
     def run(self, *args, grid, stream):
-        if len(self.launchers) > 1:
-            self.autotune_to_one_config(*args, grid=grid)
+        if len(self.launchers) != 1:
+            if len(self.launchers) == 0:
+                self.precompile()
+            if len(self.launchers) > 1:
+                self.autotune_to_one_config(*args, grid=grid)
 
         (launcher,) = self.launchers
         if launcher.config.pre_hook is not None:

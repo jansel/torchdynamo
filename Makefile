@@ -88,8 +88,8 @@ pull-deps:
 	(cd ../torchtext      && git pull && git submodule update --init --recursive)
 	(cd ../torchaudio     && git pull && git submodule update --init --recursive)
 	(cd ../detectron2     && git pull && git submodule update --init --recursive)
-	(cd ../triton         && git checkout master && git pull && git checkout $(TRITON_VERSION) && git submodule update --init --recursive)
 	(cd ../torchbenchmark && git pull && git submodule update --init --recursive)
+	(cd ../triton         && git checkout master && git pull && git checkout $(TRITON_VERSION) && git submodule update --init --recursive)
 
 build-deps: clone-deps
 	# conda env remove --name torchdynamo
@@ -106,9 +106,8 @@ build-deps: clone-deps
 	(cd ../torchtext   && python setup.py clean && python setup.py develop)
 	(cd ../torchaudio  && python setup.py clean && python setup.py develop)
 	(cd ../detectron2  && python setup.py clean && python setup.py develop)
-	(cd ../triton/python && python setup.py clean && python setup.py develop)
 	(cd ../torchbenchmark && python install.py --continue_on_fail)
-	pip install gym==0.25.2
+	(cd ../triton/python && python setup.py clean && python setup.py develop)
 	make setup_lint
 	python setup.py develop
 

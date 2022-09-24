@@ -189,7 +189,6 @@ class WrapperCodeGen(CodeGen):
                 import triton.language as tl
                 import random
                 from torch import empty_strided, as_strided, device
-                # get_cuda_stream = lambda dev_idx: torch.cuda.current_stream(dev_idx).cuda_stream
                 from torch._C import _cuda_getCurrentRawStream as get_cuda_stream
                 from {codecache.__name__} import AsyncCompile
 
@@ -228,15 +227,14 @@ class WrapperCodeGen(CodeGen):
                     "from torchinductor.triton_ops.batched_matmul import bmm_out as triton_bmm_out"
                 )
 
-        self.prefix.writelines(
-            [
-                "",
-                "",
-                "async_compile.wait(globals())",
-                "del async_compile" "",
-                "",
-                f"def call({', '.join(V.graph.graph_inputs.keys())}):",
-            ]
+        self.prefix.splice(
+            f"""
+
+            async_compile.wait(globals())
+            del async_compile
+
+            def call({', '.join(V.graph.graph_inputs.keys())}):
+            """
         )
         with self.prefix.indent():
             for name in V.graph.randomness_seeds:

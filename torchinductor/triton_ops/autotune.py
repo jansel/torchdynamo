@@ -51,7 +51,7 @@ class CachingAutotuner(KernelInterface):
         self.launchers = [self.precompile(cfg) for cfg in configs]
 
     def precompile(self, config: triton.runtime.autotuner.Config):
-        """ Ahead of time compile a given autotuner config. """
+        """Ahead of time compile a given autotuner config."""
         torch.cuda.set_device(torch.cuda.current_device())
         compile_meta = copy.deepcopy(self.meta)
         for k, v in config.kwargs.items():
@@ -86,7 +86,7 @@ class CachingAutotuner(KernelInterface):
                 grid_0, grid_1, grid_2 = grid(grid_meta)
                 bin.c_wrapper(grid_0, grid_1, grid_2, bin.num_warps, bin.shared,
                               stream, bin.cu_function, {', '.join(call_args)})
-        """.lstrip(),
+            """.lstrip(),
             scope,
         )
         launcher = scope["launcher"]
@@ -94,7 +94,7 @@ class CachingAutotuner(KernelInterface):
         return launcher
 
     def bench(self, launcher, *args, grid):
-        """ Measure the performance of a given launcher """
+        """Measure the performance of a given launcher"""
         stream = get_cuda_stream(torch.cuda.current_device())
 
         def kernel_call():
@@ -111,7 +111,7 @@ class CachingAutotuner(KernelInterface):
         return do_bench(kernel_call)
 
     def autotune_to_one_config(self, *args, **kwargs):
-        """ Do the actual autotuning """
+        """Do the actual autotuning"""
         timings = {
             launcher: self.bench(launcher, *args, **kwargs)
             for launcher in self.launchers
@@ -606,14 +606,31 @@ def mm_autotune(get_io_bound_configs=False):
 def grid(xnumel, ynumel=None, znumel=None):
     """Helper function to compute triton grids"""
 
-    def grid_fn(meta):
-        x = cdiv(xnumel, meta["XBLOCK"])
-        y = 1
-        z = 1
-        if ynumel and "YBLOCK" in meta:
-            y = cdiv(ynumel, meta["YBLOCK"])
-            if znumel:
-                z = cdiv(znumel, meta["ZBLOCK"])
-        return (x, y, z)
+    if ynumel and znumel:
+
+        def grid_fn(meta):
+            return (
+                cdiv(xnumel, meta["XBLOCK"]),
+                cdiv(ynumel, meta["YBLOCK"]),
+                cdiv(znumel, meta["ZBLOCK"]),
+            )
+
+    elif ynumel:
+
+        def grid_fn(meta):
+            return (
+                cdiv(xnumel, meta["XBLOCK"]),
+                cdiv(ynumel, meta["YBLOCK"]),
+                1,
+            )
+
+    else:
+
+        def grid_fn(meta):
+            return (
+                cdiv(xnumel, meta["XBLOCK"]),
+                1,
+                1,
+            )
 
     return grid_fn

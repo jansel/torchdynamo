@@ -1,10 +1,14 @@
+import asyncio
 import builtins
 import collections
 import copy
+import functools
 import hashlib
 import json
 import logging
+import multiprocessing
 import os.path
+import threading
 from typing import List
 
 import torch
@@ -24,6 +28,7 @@ from torchinductor.ir import ReductionHint
 from torchinductor.triton_ops.mm_perf_model import estimate_matmul_time
 from torchinductor.utils import conditional_product
 
+from ..codecache import AsyncCompile
 from .conv_perf_model import early_config_prune as conv_early_config_prune
 from .conv_perf_model import estimate_conv_time
 
@@ -43,6 +48,10 @@ class CachingAutotuner(KernelInterface):
     configs when created.
     """
 
+    @functools.lru_cache(1)
+    def compile_semaphore(self, compile_threads):
+        return threading.Semaphore(compile_threads)
+
     def __init__(self, fn, meta, configs, save_cache_hook):
         super().__init__()
         self.fn = fn
@@ -52,19 +61,40 @@ class CachingAutotuner(KernelInterface):
         self.launchers = []
 
     def precompile(self):
-        self.launchers = [self.precompile_config(cfg) for cfg in self.configs]
+        asyncio.run(self.precompile_async())
 
-    def precompile_config(self, config: triton.runtime.autotuner.Config):
+    async def precompile_async(self):
+        tasks = [self._precompile_config(cfg) for cfg in self.configs]
+        self.launchers = await asyncio.gather(*tasks)
+
+    async def _precompile_config(self, cfg: triton.runtime.autotuner.Config):
         """Ahead of time compile a given autotuner config."""
         torch.cuda.set_device(torch.cuda.current_device())
         compile_meta = copy.deepcopy(self.meta)
-        for k, v in config.kwargs.items():
+        for k, v in cfg.kwargs.items():
             compile_meta["constants"][self.fn.arg_names.index(k)] = v
+        major, minor = torch.cuda.get_device_capability(compile_meta["device"])
+        compile_meta["cc"] = major * 10 + minor
+        compile_meta["num_warps"] = cfg.num_warps
+        compile_meta["num_stages"] = cfg.num_stages
+
+        if config.compile_threads > 1:
+            with AsyncCompile.semaphore():
+                try:
+                    p = multiprocessing.Process(
+                        target=triton.compile,
+                        args=(self.fn,),
+                        kwargs={**compile_meta, "warm_cache_only": True},
+                    )
+                    p.start()
+                    p.join()
+                except Exception:
+                    log.exception("Error in async Triton compile")
+                    # continue on to hopefully get a better error message below
+
         binary = triton.compile(
             self.fn,
             **compile_meta,
-            num_warps=config.num_warps,
-            num_stages=config.num_stages,
         )
 
         call_args = [
@@ -73,11 +103,11 @@ class CachingAutotuner(KernelInterface):
             if i not in self.fn.constexprs
         ]
         def_args = list(self.fn.arg_names)
-        while def_args and def_args[-1] in config.kwargs:
+        while def_args and def_args[-1] in cfg.kwargs:
             def_args.pop()
 
         scope = {
-            "grid_meta": config.kwargs,
+            "grid_meta": cfg.kwargs,
             "bin": binary,
             "torch": torch,
             "set_device": torch.cuda.set_device,
@@ -94,7 +124,7 @@ class CachingAutotuner(KernelInterface):
             scope,
         )
         launcher = scope["launcher"]
-        launcher.config = config
+        launcher.config = cfg
         return launcher
 
     def bench(self, launcher, *args, grid):

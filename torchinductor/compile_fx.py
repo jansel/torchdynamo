@@ -100,10 +100,11 @@ def compile_fx_inner(
 
         if len(set(graph.device_types)) > 1:
             log.warning("skipping cudagraphs due to multiple devices")
-        elif graph.mutated_inputs and set(graph.device_types) == {"cuda"}:
-            log.warning("skipping cudagraphs due to input mutation")
-        elif complex_memory_overlap_inputs:
-            log.warning("skipping cudagraphs due to complex input striding")
+        elif set(graph.device_types) == {"cuda"}:
+            if graph.mutated_inputs:
+                log.warning("skipping cudagraphs due to input mutation")
+            elif complex_memory_overlap_inputs:
+                log.warning("skipping cudagraphs due to complex input striding")
 
     return align_inputs(compiled_fn, example_inputs, range(num_fixed))
 

@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 
 # add some debug printouts
@@ -51,7 +52,7 @@ unroll_reductions_threshold = 8
 
 comment_origin = False
 
-compile_threads = 1
+compile_threads = multiprocessing.cpu_count()
 
 
 # config specific to codegen/cpp.pp

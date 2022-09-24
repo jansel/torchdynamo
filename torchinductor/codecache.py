@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import dataclasses
 import functools
 import getpass
 import hashlib
@@ -8,10 +10,9 @@ import re
 import subprocess
 import sysconfig
 import tempfile
+import threading
 import types
 from ctypes import cdll
-from multiprocessing.pool import AsyncResult
-from multiprocessing.pool import ThreadPool
 from typing import Any
 from typing import Dict
 
@@ -151,10 +152,6 @@ class CppCodeCache:
 
         return cls.cache[key]
 
-    @classmethod
-    def precompile(cls, source_code):
-        return cls.load(source_code).kernel
-
 
 class PyCodeCache:
     cache = dict()
@@ -198,39 +195,46 @@ class TritonCodeCache:
         return TritonCodeCache.load(source_code)
 
 
+@dataclasses.dataclass
+class CompileResult:
+    value: Any = None
+
+
 class AsyncCompile:
     @staticmethod
     @functools.lru_cache(1)
-    def pool():
-        return ThreadPool(config.compile_threads)
+    def semaphore():
+        return threading.Semaphore(config.compile_threads)
 
     def __init__(self):
-        self.pending = dict()
-
-    def _compile_cached(self, fn, source_code, *args):
-        if source_code in self.pending:
-            return self.pending[source_code]
-        if config.compile_threads == 1:
-            res = fn(source_code, *args)
-        else:
-            res = self.pool().apply_async(fn, (source_code, *args))
-        self.pending[source_code] = res
-        return res
+        self.tasks = []
 
     def triton(self, source_code):
-        kernel = TritonCodeCache.load(source_code)
+        async def task():
+            kernel = TritonCodeCache.load(source_code)
+            await kernel.precompile_async()
+            result.value = kernel
 
-        def async_job(_):
-            kernel.precompile()
-            return kernel
-
-        return self._compile_cached(async_job, source_code)
+        result = CompileResult()
+        self.tasks.append(task())
+        return result
 
     def cpp(self, source_code):
-        return self._compile_cached(CppCodeCache.precompile, source_code)
+        async def task():
+            with self.semaphore():
+                result.value = CppCodeCache.load(source_code)
+
+        result = CompileResult()
+        self.tasks.append(task())
+        return result
 
     def wait(self, scope: Dict[str, Any]):
-        for key, value in list(scope.items()):
-            if isinstance(value, AsyncResult):
-                scope[key] = value.get()
-        self.pending.clear()
+        async def gather():
+            await asyncio.gather(*self.tasks)
+
+        asyncio.run(gather())
+
+        for key, result in list(scope.items()):
+            if isinstance(result, CompileResult):
+                scope[key] = result.value
+        self.tasks.clear()

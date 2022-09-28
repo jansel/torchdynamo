@@ -1,7 +1,5 @@
 import builtins
-import collections
 import copy
-import functools
 import hashlib
 import json
 import logging
@@ -33,23 +31,14 @@ from .conv_perf_model import estimate_conv_time
 
 log = logging.getLogger(__name__)
 
-instance_descriptor = collections.namedtuple(
-    "instance_descriptor", ["divisible_by_16", "equal_to_1"]
-)
-
 
 class CachingAutotuner(KernelInterface):
     """
-    Simplified version of Triton autotuner that has no invalidation key
-    and caches the best config to disk to improve cold start times.
-
-    Unlike the main triton Autotuner, this version AOT compiles all
-    configs when created.
+    Simplified version of Triton autotuner that has no invalidation
+    key and caches the best config to disk to improve cold start times.
+    Unlike the main triton Autotuner, this version can precompile all
+    configs, and does not rely on the Triton JIT.
     """
-
-    @functools.lru_cache(1)
-    def compile_semaphore(self, compile_threads):
-        return threading.Semaphore(compile_threads)
 
     def __init__(self, fn, meta, configs, save_cache_hook):
         super().__init__()
@@ -220,6 +209,7 @@ def cached_autotune(
     has additional debugging, error handling, and on-disk caching.
     """
     configs = unique_configs(configs)
+    assert len(configs) == 1 or filename
 
     # on disk caching logic
     if filename is not None and len(configs) > 1:

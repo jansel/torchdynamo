@@ -1,5 +1,4 @@
 import base64
-import dataclasses
 import functools
 import getpass
 import hashlib
@@ -9,7 +8,6 @@ import re
 import subprocess
 import sysconfig
 import tempfile
-import threading
 import types
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
@@ -157,7 +155,6 @@ class CppCodeCache:
 class PyCodeCache:
     cache = dict()
     clear = staticmethod(cache.clear)
-    lock = threading.Lock()
 
     @classmethod
     def load(cls, source_code):
@@ -167,10 +164,10 @@ class PyCodeCache:
                 code = compile(f.read(), path, "exec")
                 mod = types.ModuleType(f"{__name__}.{key}")
                 mod.__file__ = path
+                mod.key = key
                 exec(code, mod.__dict__, mod.__dict__)
-                if key not in cls.cache:
-                    cls.cache[key] = mod
-                    cls.cache[key].key = key
+                # another thread might set this first
+                cls.cache.setdefault(key, mod)
         return cls.cache[key]
 
 
@@ -193,15 +190,6 @@ class TritonCodeCache:
         mod = PyCodeCache.load(source_code)
         return getattr(mod, cls.get_name(mod))
 
-    @staticmethod
-    def precompile(source_code):
-        return TritonCodeCache.load(source_code)
-
-
-@dataclasses.dataclass
-class CompileResult:
-    value: Any = None
-
 
 class AsyncCompile:
     @staticmethod
@@ -212,13 +200,13 @@ class AsyncCompile:
 
     @classmethod
     def submit(cls, task):
-        if config.compile_threads == 1:
+        if config.compile_threads <= 1:
             return task()
         return cls.pool().submit(task)
 
     @classmethod
     def map(cls, fn, seq):
-        if config.compile_threads == 1 or len(seq) <= 1:
+        if config.compile_threads <= 1 or len(seq) <= 1:
             return list(map(fn, seq))
         return [t.result() for t in [cls.pool().submit(fn, x) for x in seq]]
 
@@ -238,6 +226,7 @@ class AsyncCompile:
         return self.submit(task)
 
     def wait(self, scope: Dict[str, Any]):
-        for key, result in list(scope.items()):
-            if isinstance(result, Future):
-                scope[key] = result.result()
+        if config.compile_threads > 1:
+            for key, result in list(scope.items()):
+                if isinstance(result, Future):
+                    scope[key] = result.result()

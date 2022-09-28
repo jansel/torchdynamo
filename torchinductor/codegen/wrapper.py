@@ -185,11 +185,8 @@ class WrapperCodeGen(CodeGen):
             f"""
                 from ctypes import c_void_p, c_long
                 import torch
-                import triton
-                import triton.language as tl
                 import random
                 from torch import empty_strided, as_strided, device
-                from torch._C import _cuda_getCurrentRawStream as get_cuda_stream
                 from {codecache.__name__} import AsyncCompile
 
                 aten = torch.ops.aten
@@ -201,7 +198,10 @@ class WrapperCodeGen(CodeGen):
         if has_triton():
             self.header.splice(
                 """
+                import triton
+                import triton.language as tl
                 from torchinductor.triton_ops.autotune import grid
+                from torch._C import _cuda_getCurrentRawStream as get_cuda_stream
                 """
             )
 
@@ -250,11 +250,12 @@ class WrapperCodeGen(CodeGen):
 
         self.allocated = set()
         self.freed = set()
-        self.get_cuda_stream = functools.lru_cache(None)(self.get_cuda_stream)
+        self.write_get_cuda_stream = functools.lru_cache(None)(
+            self.write_get_cuda_stream
+        )
 
-    def get_cuda_stream(self, index):
+    def write_get_cuda_stream(self, index):
         name = f"stream{index}"
-        # self.writeline("torch.cuda.set_device(torch.cuda.current_device())")
         self.writeline(f"{name} = get_cuda_stream({index})")
         return name
 

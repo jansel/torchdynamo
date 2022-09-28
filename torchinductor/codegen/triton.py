@@ -11,16 +11,15 @@ from typing import List
 
 import sympy
 import torch
-from triton.runtime.jit import JITFunction
 
 import torchinductor
 
 from .. import config
 from .. import ir
 from ..ir import ReductionHint
-from ..triton_ops.autotune import instance_descriptor
 from ..utils import free_symbol_startswith
 from ..utils import has_triton_libdevice
+from ..utils import instance_descriptor
 from ..utils import sympy_product
 from ..utils import sympy_subs
 from ..virtualized import V
@@ -38,6 +37,8 @@ log = logging.getLogger(__name__)
 
 
 def signature_of(arg):
+    from triton.runtime.jit import JITFunction
+
     if isinstance(arg, TensorArg):
         return JITFunction._type_of(arg.dtype)
     if isinstance(arg, SizeArg):
@@ -46,6 +47,8 @@ def signature_of(arg):
 
 
 def config_of(args):
+    from triton.runtime.jit import JITFunction
+
     divisible_by_16 = [
         i
         for i, arg in enumerate(args)
@@ -168,6 +171,10 @@ class TritonOverrides(OpOverrides):
         )
 
     @staticmethod
+    def lgamma(x):
+        return f"tl.libdevice.lgamma({x})"
+
+    @staticmethod
     def logical_and(a, b):
         return f"{a} & {b}"
 
@@ -194,7 +201,7 @@ class TritonOverrides(OpOverrides):
 
     @staticmethod
     def fmod(a, b):
-        return f"tl.libdevice.fmod({a}, {b})"
+        return f"tl.libdevice.fmod({a}, ({b}).to(tl.float32))"
 
     @staticmethod
     def pow(a, b):
@@ -935,7 +942,8 @@ class TritonKernel(Kernel):
                     import triton
                     import triton.language as tl
                     from torchinductor.ir import ReductionHint
-                    from torchinductor.triton_ops.autotune import {heuristics}, instance_descriptor
+                    from torchinductor.triton_ops.autotune import {heuristics}
+                    from torchinductor.utils import instance_descriptor
                 """
             )
 
@@ -949,16 +957,16 @@ class TritonKernel(Kernel):
 
         for tree in self.range_trees:
             if tree.prefix != "r" or self.inside_reduction:
-                if config.dynamic_shapes and not isinstance(tree.numel, sympy.Integer):
-                    triton_meta["signature"][len(argdefs)] = signature_of(
-                        SizeArg(f"{tree.prefix}numel", tree.numel)
-                    )
-                    argdefs.append(f"{tree.prefix}numel")
-                else:
-                    triton_meta["constants"][len(argdefs)] = V.graph.sizevars.size_hint(
-                        tree.numel
-                    )
-                    argdefs.append(f"{tree.prefix}numel: tl.constexpr")
+                triton_meta["signature"][len(argdefs)] = signature_of(
+                    SizeArg(f"{tree.prefix}numel", tree.numel)
+                )
+                argdefs.append(f"{tree.prefix}numel")
+                # constexpr version causes issues, see
+                # https://github.com/pytorch/torchdynamo/pull/1362
+                # triton_meta["constants"][len(argdefs)] = V.graph.sizevars.size_hint(
+                #     tree.numel
+                # )
+                # argdefs.append(f"{tree.prefix}numel: tl.constexpr")
 
         for tree in self.range_trees:
             if tree.prefix != "r" or self.inside_reduction:
@@ -1025,9 +1033,9 @@ class TritonKernel(Kernel):
             if tree.prefix != "r":
                 grid.append(expr)
         call_args = ", ".join(call_args)
-        stream = code.get_cuda_stream(V.graph.scheduler.current_device.index)
+        stream_name = code.write_get_cuda_stream(V.graph.scheduler.current_device.index)
         code.writeline(
-            f"{name}.run({call_args}, grid=grid({', '.join(grid)}), stream={stream})"
+            f"{name}.run({call_args}, grid=grid({', '.join(grid)}), stream={stream_name})"
         )
 
 

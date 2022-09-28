@@ -179,11 +179,10 @@ def cudagraphify_impl(model, inputs, static_input_idxs=()):
 
     def static_input(x):
         """
-        Copy and input why preserving strides
+        Copy and input while preserving strides
         """
         # TODO(jansel): figure out why this version doesn't work:
         # return torch.empty_strided(x.size(), x.stride(), dtype=x.dtype, device=x.device)
-
         needed_size = (
             sum((shape - 1) * stride for shape, stride in zip(x.size(), x.stride())) + 1
         )

@@ -310,8 +310,9 @@ def fill_tensor(self, value: Tensor):
 
 
 @register_decomposition([aten.bernoulli.default])
-def bernoulli(self):
-    return torch.rand_like(self) < self
+def bernoulli(self, *, generator=None):
+    assert generator is None
+    return torch.rand_like(self, dtype=torch.float32) < self
 
 
 """
